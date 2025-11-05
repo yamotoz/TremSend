@@ -1,0 +1,267 @@
+import { createClient } from '@supabase/supabase-js';
+
+// Configurações do Supabase - substitua pelas suas credenciais
+const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || 'https://your-project.supabase.co';
+const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY || 'your-anon-key';
+
+// Debug: verificar se as variáveis estão sendo carregadas
+console.log('=== DEBUG SUPABASE ===');
+console.log('Supabase URL:', supabaseUrl);
+console.log('Supabase Key:', supabaseAnonKey ? 'Carregada' : 'Não carregada');
+console.log('URL válida:', supabaseUrl.includes('xqzojsbjatrvnclybaxf'));
+console.log('Key válida:', supabaseAnonKey.length > 100);
+console.log('========================');
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// Funções auxiliares para o banco de dados
+export const database = {
+  // Autenticação de usuários
+  async authenticateUser(username, password) {
+    try {
+      console.log('=== TENTANDO AUTENTICAR USUÁRIO ===');
+      console.log('Username:', username);
+      console.log('Password:', password);
+      
+      const { data, error } = await supabase
+        .rpc('verificar_login', {
+          p_username: username,
+          p_password: password
+        });
+
+      console.log('Resultado da autenticação:', { data, error });
+
+      if (error) throw error;
+      
+      if (data && data.length > 0) {
+        return { 
+          success: true, 
+          user: data[0],
+          message: 'Login realizado com sucesso!'
+        };
+      } else {
+        return { 
+          success: false, 
+          message: 'Credenciais inválidas'
+        };
+      }
+    } catch (error) {
+      console.error('Erro ao autenticar usuário:', error);
+      return { 
+        success: false, 
+        message: 'Erro de conexão com o servidor'
+      };
+    }
+  },
+
+  // Criar usuário (apenas admins; apenas 'stenio' cria admins)
+  async createUser({ requesterUsername, username, password, fullName, email, isAdmin = false }) {
+    try {
+      const { data, error } = await supabase.rpc('criar_usuario', {
+        p_solicitante_username: requesterUsername,
+        p_username: username,
+        p_password: password,
+        p_nome_completo: fullName || null,
+        p_email: email || null,
+        p_admin: !!isAdmin
+      });
+
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao criar usuário:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Trocar senha do próprio usuário
+  async changePassword({ username, currentPassword, newPassword }) {
+    try {
+      const { data, error } = await supabase.rpc('trocar_senha', {
+        p_username: username,
+        p_senha_atual: currentPassword,
+        p_nova_senha: newPassword
+      });
+
+      if (error) throw error;
+      const ok = data === true || data === 'true';
+      return { success: ok };
+    } catch (error) {
+      console.error('Erro ao trocar senha:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Inserir dados manualmente
+  async insertManualData(data) {
+    try {
+      console.log('=== TENTANDO INSERIR DADOS ===');
+      console.log('Dados recebidos:', data);
+      console.log('Supabase client:', supabase);
+      
+      const { data: result, error } = await supabase
+        .from('origin_dados_lead')
+        .insert([{
+          nome: data.nome,
+          empresa: data.empresa,
+          email: data.email,
+          telefone: data.telefone,
+          origem: 'Manual',
+          created_at: new Date().toISOString()
+        }])
+        .select();
+
+      console.log('Resultado da inserção:', { result, error });
+
+      if (error) throw error;
+      return { success: true, data: result };
+    } catch (error) {
+      console.error('Erro ao inserir dados:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Buscar todos os leads
+  async getAllLeads() {
+    try {
+      console.log('=== DEBUG getAllLeads ===');
+      console.log('Tentando buscar dados da tabela origin_dados_lead...');
+      
+      const { data, error } = await supabase
+        .from('origin_dados_lead')
+        .select('*')
+        .order('id', { ascending: false });
+
+      console.log('Resultado da query:', { data, error });
+      console.log('Quantidade de registros:', data?.length || 0);
+      console.log('========================');
+
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao buscar leads:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Buscar leads de pesquisa
+  async getResearchData() {
+    try {
+      console.log('=== DEBUG getResearchData ===');
+      console.log('Tentando buscar dados da tabela dados_pesquisa...');
+      
+      const { data, error } = await supabase
+        .from('dados_pesquisa')
+        .select('*')
+        .order('id', { ascending: false });
+
+      console.log('Resultado da query pesquisa:', { data, error });
+      console.log('Quantidade de registros:', data?.length || 0);
+      if (data && data.length > 0) {
+        console.log('Primeiro registro:', data[0]);
+        console.log('Pontuação do primeiro:', data[0].pontuacao);
+        console.log('Tipo da pontuação:', typeof data[0].pontuacao);
+        console.log('Todos os registros com pontuação:');
+        data.forEach((item, index) => {
+          console.log(`Registro ${index + 1}: ${item.nome} - Pontuação: ${item.pontuacao} (${typeof item.pontuacao}) - Valor: ${JSON.stringify(item.pontuacao)}`);
+        });
+      }
+      console.log('========================');
+
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao buscar dados de pesquisa:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Inserir dados de CSV
+  async insertCsvData(data, origem = 'CSV Upload') {
+    try {
+      // Verificar duplicatas antes de inserir (apenas para valores não vazios)
+      const emailsToCheck = data.filter(item => item.email && item.email !== 'EMPTY').map(item => item.email);
+      const telefonesToCheck = data.filter(item => item.telefone && item.telefone !== 'EMPTY').map(item => item.telefone);
+      
+      let existingData = [];
+      if (emailsToCheck.length > 0 || telefonesToCheck.length > 0) {
+        const { data: checkData, error: checkError } = await supabase
+          .from('origin_dados_lead')
+          .select('email, telefone');
+        
+        if (checkError) throw checkError;
+        existingData = checkData || [];
+      }
+
+      // Filtrar dados duplicados (apenas para valores não vazios)
+      const filteredData = data.filter(item => {
+        if ((!item.email || item.email === 'EMPTY') && (!item.telefone || item.telefone === 'EMPTY')) return true; // Se ambos são vazios, não há duplicata
+        return !existingData.some(dup => 
+          (item.email && item.email !== 'EMPTY' && dup.email === item.email) || 
+          (item.telefone && item.telefone !== 'EMPTY' && dup.telefone === item.telefone)
+        );
+      });
+
+      if (filteredData.length === 0) {
+        return { 
+          success: false, 
+          error: 'Todos os dados já existem no sistema',
+          duplicates: data.length
+        };
+      }
+
+      const dataToInsert = filteredData.map(item => ({
+        ...item,
+        origem,
+        created_at: new Date().toISOString()
+      }));
+
+      const { data: result, error } = await supabase
+        .from('origin_dados_lead')
+        .insert(dataToInsert)
+        .select();
+
+      if (error) throw error;
+
+      return { 
+        success: true, 
+        data: result,
+        duplicates: data.length - filteredData.length,
+        inserted: filteredData.length
+      };
+    } catch (error) {
+      console.error('Erro ao inserir dados CSV:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Verificar se email ou telefone já existe
+  async checkDuplicate(email, telefone) {
+    try {
+      // Só verificar duplicatas se pelo menos um dos campos não for vazio
+      if ((!email || email === 'EMPTY') && (!telefone || telefone === 'EMPTY')) {
+        return { exists: false, data: null };
+      }
+
+      let query = supabase
+        .from('origin_dados_lead')
+        .select('id, nome, email, telefone');
+
+      if (email && email !== 'EMPTY' && telefone && telefone !== 'EMPTY') {
+        query = query.or(`email.eq.${email},telefone.eq.${telefone}`);
+      } else if (email && email !== 'EMPTY') {
+        query = query.eq('email', email);
+      } else if (telefone && telefone !== 'EMPTY') {
+        query = query.eq('telefone', telefone);
+      }
+
+      const { data, error } = await query.limit(1);
+
+      if (error) throw error;
+      return { exists: data && data.length > 0, data: data?.[0] };
+    } catch (error) {
+      console.error('Erro ao verificar duplicata:', error);
+      return { exists: false, error: error.message };
+    }
+  }
+};
