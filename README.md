@@ -1,6 +1,6 @@
 # TremSend — Automação de Mensagens WhatsApp (WAHA)
 
-![TremSend](public/readme.png)
+![TremSend](public/vid_img/readme.png)
 
 Interface focada em envio automatizado e personalizado de mensagens via WhatsApp, consumindo a WAHA (WhatsApp HTTP API) e integrando cadastro/autenticação de usuários com Supabase.
 
