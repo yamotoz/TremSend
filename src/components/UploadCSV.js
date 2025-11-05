@@ -13,6 +13,8 @@ const UploadCSV = ({ onClose }) => {
   const [showPreview, setShowPreview] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [confirmationData, setConfirmationData] = useState(null);
+  const [removeDuplicates, setRemoveDuplicates] = useState(false);
+  const [validateWithNine, setValidateWithNine] = useState(false);
   const [errors, setErrors] = useState([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef(null);
@@ -29,6 +31,7 @@ const UploadCSV = ({ onClose }) => {
   const sendAbortRef = useRef(false);
   const [nextCountdown, setNextCountdown] = useState(0);
   const pendingListRef = useRef([]);
+  const sentNumbersSetRef = useRef(new Set());
   const maxRetries = 3;
 
   // Função para gerar prévia da mensagem
@@ -210,12 +213,26 @@ const UploadCSV = ({ onClose }) => {
     }
 
     // Calcular estatísticas relevantes ao envio
+    const digitsList = correctedData.map(row => String(row.telefone || '').replace(/\D/g, ''));
+    const seenDup = new Set();
+    const seenOnce = new Set();
+    let duplicatesCount = 0;
+    for (const d of digitsList) {
+      if (!d) continue;
+      if (seenOnce.has(d)) {
+        duplicatesCount += 1;
+        seenDup.add(d);
+      } else {
+        seenOnce.add(d);
+      }
+    }
     const stats = {
       total: correctedData.length,
-      numerosCurtos: correctedData.filter(row => String(row.telefone || '').replace(/\D/g, '').length > 0 && String(row.telefone || '').replace(/\D/g, '').length < 7).length
+      numerosCurtos: correctedData.filter(row => String(row.telefone || '').replace(/\D/g, '').length > 0 && String(row.telefone || '').replace(/\D/g, '').length < 7).length,
+      duplicados: duplicatesCount
     };
 
-    // Se houver telefones vazios, mostrar modal de confirmação
+    // Mostrar modal de confirmação com estatísticas
     setConfirmationData({ data: correctedData, stats });
     setShowConfirmation(true);
   };
@@ -227,7 +244,25 @@ const UploadCSV = ({ onClose }) => {
     // Abrir tela de envio imediatamente (o usuário solicitou que a tela abra na segunda confirmação)
     // Fechar modal de confirmação para revelar a tela de envio
     setShowConfirmation(false);
-    pendingListRef.current = [...(confirmationData.data || [])];
+    let startData = [...(confirmationData.data || [])];
+    if (removeDuplicates) {
+      const seen = new Set();
+      const originalLength = startData.length;
+      startData = startData.filter(row => {
+        const d = String(row.telefone || '').replace(/\D/g, '');
+        if (!d) return true; // manter vazios para contabilização de curtos/vazios
+        if (seen.has(d)) {
+          return false; // remove repetidos além do primeiro
+        }
+        seen.add(d);
+        return true;
+      });
+      const removed = originalLength - startData.length;
+      if (removed > 0) toast.success(`Removidos ${removed} números duplicados`);
+    }
+    // Limpa controle de já enviados para este lote
+    sentNumbersSetRef.current = new Set();
+    pendingListRef.current = startData;
     setPendingList(pendingListRef.current);
     setSentList([]);
     setShowSendingScreen(true);
@@ -241,6 +276,19 @@ const UploadCSV = ({ onClose }) => {
     // evitar múltiplos workers
     if (sendWorkerRef.current) return;
     sendAbortRef.current = false;
+
+    const toggleNineAtPositionFromRight = (digits, posFromRight = 9) => {
+      if (!digits) return digits;
+      const clean = String(digits).replace(/\D/g, '');
+      if (clean.length < posFromRight) return clean;
+      const index = clean.length - posFromRight;
+      if (clean[index] === '9') {
+        // remover o 9 naquela posição
+        return clean.slice(0, index) + clean.slice(index + 1);
+      }
+      // inserir o 9 naquela posição
+      return clean.slice(0, index) + '9' + clean.slice(index);
+    };
 
     const awaitIntervalCountdown = async () => {
       // aguarda o intervalo e atualiza contagem regressiva visível
@@ -301,10 +349,30 @@ const UploadCSV = ({ onClose }) => {
           continue;
         }
 
+        // Se já foi enviado anteriormente neste lote, pula
+        if (sentNumbersSetRef.current.has(onlyDigits)) {
+          setSentList(prev => [
+            ...prev,
+            { ...next, status: 'skipped', reason: 'já enviado anteriormente', message: personalized, sentAt: new Date().toISOString(), attempts: 0 }
+          ]);
+          // aguarda e segue
+          // eslint-disable-next-line no-await-in-loop
+          await awaitIntervalCountdown();
+          continue;
+        }
+
+        const altDigits = validateWithNine ? toggleNineAtPositionFromRight(onlyDigits, 9) : null;
+
         while (attempt < maxRetries && !sent && !sendAbortRef.current) {
           try {
             // eslint-disable-next-line no-await-in-loop
-      await wahaApi.sendMessage(next.telefone, personalized);
+            {
+              // Tentativa 1: número original; Tentativa 2: número alternado; Tentativa 3+: volta ao original
+              const useAltNow = validateWithNine && attempt === 1 && altDigits && !sentNumbersSetRef.current.has(altDigits);
+              const phoneToUse = useAltNow ? altDigits : onlyDigits;
+              await wahaApi.sendMessage(phoneToUse, personalized);
+              sentNumbersSetRef.current.add(phoneToUse);
+            }
             sent = true;
             setSentList(prev => [...prev, { ...next, status: 'sent', message: personalized, sentAt: new Date().toISOString(), attempts: attempt + 1 }]);
           } catch (err) {
@@ -742,6 +810,14 @@ const UploadCSV = ({ onClose }) => {
                       </span>
                     </div>
                   )}
+                  {confirmationData.stats.duplicados > 0 && (
+                    <div className="flex items-center space-x-2">
+                      <div className="w-2 h-2 bg-yellow-400 rounded-full"></div>
+                      <span className="text-sm text-dark-300">
+                        <span className="text-yellow-300 font-semibold">{confirmationData.stats.duplicados}</span> números duplicados encontrados
+                      </span>
+                    </div>
+                  )}
                   
                   {/* Removido: não exibir emails faltantes */}
                 </div>
@@ -760,6 +836,33 @@ const UploadCSV = ({ onClose }) => {
                   <span className="text-sm text-white">Colocar 55 na frente de todos os números</span>
                 </label>
                 <p className="text-xs text-dark-400 mt-2">Quando marcado, adicionaremos 55 aos números que não começarem com 55.</p>
+                {confirmationData.stats.duplicados > 0 && (
+                  <div className="mt-4">
+                    <label className="inline-flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        className="form-checkbox h-4 w-4 text-primary-500"
+                        checked={removeDuplicates}
+                        onChange={(e) => setRemoveDuplicates(e.target.checked)}
+                      />
+                      <span className="text-sm text-white">Excluir números duplicados</span>
+                    </label>
+                    <p className="text-xs text-dark-400 mt-2">Mantém apenas a primeira ocorrência de cada telefone.</p>
+                  </div>
+                )}
+                <div className="mt-4">
+                  <label className="inline-flex items-center space-x-3">
+                    <input
+                      type="checkbox"
+                      className="form-checkbox h-4 w-4 text-primary-500"
+                      checked={validateWithNine}
+                      onChange={(e) => setValidateWithNine(e.target.checked)}
+                    />
+                    <span className="text-sm text-white">Validação por 9</span>
+                  </label>
+                  <p className="text-xs text-dark-400 mt-2">Se um envio falhar, tentamos novamente alternando o dígito "9" na 9ª posição a partir da direita (inserir se não houver, remover se já houver).</p>
+                  <p className="text-xs text-dark-400">Só tentamos se o número ainda não tiver sido enviado neste lote.</p>
+                </div>
               </div>
 
               <div className="bg-dark-700/30 rounded-lg p-3">
