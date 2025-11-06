@@ -22,15 +22,22 @@ const UploadCSV = ({ onClose }) => {
   const [addBrazilPrefix, setAddBrazilPrefix] = useState(false);
   const [messageTemplate, setMessageTemplate] = useState('');
   const [messagePreview, setMessagePreview] = useState('');
+  const [savingTemplate, setSavingTemplate] = useState(false);
   // Envio em lote: intervalo e telas de envio
   const [sendIntervalSeconds, setSendIntervalSeconds] = useState(60); // default 1m
   // Intervalo aleatório (min/max em segundos)
   const [useRandomInterval, setUseRandomInterval] = useState(false);
   const [randomIntervalRange, setRandomIntervalRange] = useState({ min: 10, max: 50 });
+  // Auto-DDD para números sem DDD
+  const [autoFillDDD, setAutoFillDDD] = useState(false);
+  const [selectedDDD, setSelectedDDD] = useState('');
   const [showSendingScreen, setShowSendingScreen] = useState(false);
   const [pendingList, setPendingList] = useState([]);
   const [sentList, setSentList] = useState([]);
   const [sendingPaused, setSendingPaused] = useState(false);
+  const [sendingStartAt, setSendingStartAt] = useState(null);
+  const [sendingEndAt, setSendingEndAt] = useState(null);
+  const [sendingCompleted, setSendingCompleted] = useState(false);
   const sendWorkerRef = useRef(null);
   const sendAbortRef = useRef(false);
   const [nextCountdown, setNextCountdown] = useState(0);
@@ -40,24 +47,100 @@ const UploadCSV = ({ onClose }) => {
   const maxRetries = 3;
   const [currentUploadId, setCurrentUploadId] = useState(null);
   const dbSyncTimerRef = useRef(null);
+  const sendBothNineVariantsRef = useRef(false);
+  const donutCanvasRef = useRef(null);
+  const [customMappings, setCustomMappings] = useState([]);
 
-  // Função para gerar prévia da mensagem
+  // Lista de DDDs (rótulos conforme solicitado)
+  const DDD_LIST = [
+    { label: 'Alagoas (AL): 82', value: '82' },
+    { label: 'Bahia (BA): 71', value: '71' },
+    { label: 'Bahia (BA): 73', value: '73' },
+    { label: 'Bahia (BA): 74', value: '74' },
+    { label: 'Bahia (BA): 75', value: '75' },
+    { label: 'Bahia (BA): 77', value: '77' },
+    { label: 'Ceará (CE): 85', value: '85' },
+    { label: 'Ceará (CE): 88', value: '88' },
+    { label: 'Maranhão (MA): 98', value: '98' },
+    { label: 'Maranhão (MA): 99', value: '99' },
+    { label: 'Paraíba (PB): 83', value: '83' },
+    { label: 'Pernambuco (PE): 81', value: '81' },
+    { label: 'Pernambuco (PE): 87', value: '87' },
+    { label: 'Piauí (PI): 86', value: '86' },
+    { label: 'Piauí (PI): 89', value: '89' },
+    { label: 'Rio Grande do Norte (RN): 84', value: '84' },
+    { label: 'Sergipe (SE): 79', value: '79' }
+  ];
+
+  // Função para gerar prévia da mensagem (suporta {nome da coluna})
   const generateMessagePreview = useMemo(() => {
     if (!messageTemplate || !previewData || previewData.length === 0) return '';
-    
-    const firstRow = previewData[0];
-    const nome = columnMap.nome ? (firstRow[columnMap.nome] || 'NOME') : 'NOME';
-    const empresa = columnMap.empresa ? (firstRow[columnMap.empresa] || 'EMPRESA') : 'EMPRESA';
 
-    return messageTemplate
-      .replace(/{nome}/g, nome)
-      .replace(/{empresa}/g, empresa);
-  }, [messageTemplate, previewData, columnMap]);
+    const firstRow = previewData[0];
+    const lowerRow = {};
+    Object.keys(firstRow).forEach(k => { lowerRow[k.toLowerCase()] = firstRow[k]; });
+    // também mapear chaves normalizadas
+    if (columnMap.nome) lowerRow['nome'] = firstRow[columnMap.nome] || '';
+    if (columnMap.empresa) lowerRow['empresa'] = firstRow[columnMap.empresa] || '';
+    if (columnMap.email) lowerRow['email'] = firstRow[columnMap.email] || '';
+    if (columnMap.telefone) lowerRow['telefone'] = String(firstRow[columnMap.telefone] || '').replace(/\D/g, '');
+    // incluir colunas personalizadas
+    (customMappings || []).forEach(mp => {
+      const key = String(mp.name || '').trim().toLowerCase();
+      const src = String(mp.source || '').trim();
+      if (key && src && firstRow.hasOwnProperty(src)) {
+        lowerRow[key] = firstRow[src];
+      }
+    });
+
+    return messageTemplate.replace(/\{([^}]+)\}/g, (m, p1) => {
+      const key = String(p1 || '').trim().toLowerCase();
+      const val = lowerRow[key];
+      return val !== undefined && val !== null ? String(val) : '';
+    });
+  }, [messageTemplate, previewData, columnMap, customMappings]);
+
+  // Fechar modal de confirmação com tecla ESC
+  useEffect(() => {
+    const onEsc = (e) => {
+      if (e.key === 'Escape') {
+        setShowConfirmation(false);
+      }
+    };
+    if (showConfirmation) {
+      document.addEventListener('keydown', onEsc);
+    }
+    return () => {
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [showConfirmation]);
 
   // Atualiza a prévia quando o template muda
   useEffect(() => {
     setMessagePreview(generateMessagePreview);
   }, [generateMessagePreview]);
+
+  // Salvar mensagem (template) no banco de dados
+  const handleSaveMessage = async () => {
+    const content = (messageTemplate || '').trim();
+    if (!content) {
+      toast.error('Digite uma mensagem para salvar.');
+      return;
+    }
+    try {
+      setSavingTemplate(true);
+      const { success, error } = await database.saveMessageTemplate({ content });
+      if (!success) {
+        toast.error(error || 'Falha ao salvar a mensagem.');
+      } else {
+        toast.success('Mensagem salva com sucesso!');
+      }
+    } catch (err) {
+      toast.error(`Erro ao salvar: ${err.message}`);
+    } finally {
+      setSavingTemplate(false);
+    }
+  };
 
   // Preview derivado com base no mapeamento atual
   const mappedPreview = useMemo(() => {
@@ -194,11 +277,11 @@ const UploadCSV = ({ onClose }) => {
     const initialData = previewData.map(row => {
       const telefoneRaw = String(row[mapField('telefone')] || '').replace(/\D/g, '');
       return {
+        ...row, // mantém todas as colunas originais disponíveis para o template
         nome: row[mapField('nome')] || '',
         empresa: row[mapField('empresa')] || '',
         email: row[mapField('email')] || '',
-        telefone: telefoneRaw,
-  
+        telefone: telefoneRaw
       };
     });
 
@@ -252,16 +335,39 @@ const UploadCSV = ({ onClose }) => {
     // Fechar modal de confirmação para revelar a tela de envio
     setShowConfirmation(false);
     let startData = [...(confirmationData.data || [])];
-    // Normalizar telefones e aplicar prefixo 55 conforme a escolha atual
+    // Helpers para variantes com/sem 9 logo após o DDD
+    const buildNineVariants = (rawDigits) => {
+      const clean = String(rawDigits || '').replace(/\D/g, '');
+      const had55 = clean.startsWith('55');
+      const country = (addBrazilPrefix || had55) ? '55' : '';
+      const remainder = had55 ? clean.slice(2) : clean;
+      let ddd = '';
+      let local = remainder;
+      if (remainder.length >= 10) {
+        ddd = remainder.slice(0, 2);
+        local = remainder.slice(2);
+      } else if (autoFillDDD && selectedDDD) {
+        ddd = String(selectedDDD);
+        local = remainder;
+      }
+      const localNo9 = local.startsWith('9') ? local.slice(1) : local;
+      const without9 = `${country}${ddd}${localNo9}`;
+      const with9 = `${country}${ddd}9${localNo9}`;
+      return { with9, without9 };
+    };
+
+    // Normalizar telefones, aplicar auto-DDD e prefixo 55 conforme a escolha atual
     startData = startData.map(row => {
       const digits = String(row.telefone || '').replace(/\D/g, '');
-      if (addBrazilPrefix) {
-        if (digits && !digits.startsWith('55')) {
-          const pref = '55' + digits;
-          return { ...row, telefone: pref.length > 50 ? pref.substring(0, 50) : pref };
-        }
+      // Reconstituir número base (sem forçar inclusão do 9 aqui)
+      const had55 = digits.startsWith('55');
+      const country = (addBrazilPrefix || had55) ? '55' : '';
+      let base = had55 ? digits.slice(2) : digits;
+      if (autoFillDDD && selectedDDD && base && (base.length === 8 || base.length === 9)) {
+        base = String(selectedDDD) + base;
       }
-      return { ...row, telefone: digits };
+      const final = `${country}${base}`;
+      return { ...row, telefone: final.length > 50 ? final.substring(0, 50) : final };
     });
     if (removeDuplicates) {
       const seen = new Set();
@@ -335,11 +441,32 @@ const UploadCSV = ({ onClose }) => {
 
     // Limpa controle de já enviados para este lote
     sentNumbersSetRef.current = new Set();
-    pendingListRef.current = startData;
+    // Se validação por 9 estiver ativa, duplicar cada registro: primeiro COM 9, depois SEM 9 (após DDD)
+    let expandedData = startData;
+    if (validateWithNine) {
+      sendBothNineVariantsRef.current = true;
+      expandedData = [];
+      for (const row of startData) {
+        const d = String(row.telefone || '').replace(/\D/g, '');
+        const { with9, without9 } = buildNineVariants(d);
+        // Empilhar primeiro com 9, depois sem 9
+        expandedData.push({ ...row, telefone: with9, telefone_norm: with9, _nineVariant: 'with9' });
+        if (without9 !== with9) {
+          expandedData.push({ ...row, telefone: without9, telefone_norm: without9, id: null, _nineVariant: 'without9' });
+        }
+      }
+    } else {
+      sendBothNineVariantsRef.current = false;
+    }
+
+    pendingListRef.current = expandedData;
     setPendingList(pendingListRef.current);
     setSentList([]);
     setShowSendingScreen(true);
     setSendingPaused(false);
+    setSendingCompleted(false);
+    setSendingStartAt(new Date());
+    setSendingEndAt(null);
     toast.success('Iniciando envio...');
     startSendingWorker();
 
@@ -395,17 +522,24 @@ const UploadCSV = ({ onClose }) => {
     if (sendWorkerRef.current) return;
     sendAbortRef.current = false;
 
-    const toggleNineAtPositionFromRight = (digits, posFromRight = 9) => {
-      if (!digits) return digits;
-      const clean = String(digits).replace(/\D/g, '');
-      if (clean.length < posFromRight) return clean;
-      const index = clean.length - posFromRight;
-      if (clean[index] === '9') {
-        // remover o 9 naquela posição
-        return clean.slice(0, index) + clean.slice(index + 1);
+    const buildNineVariants = (rawDigits) => {
+      const clean = String(rawDigits || '').replace(/\D/g, '');
+      const had55 = clean.startsWith('55');
+      const country = (addBrazilPrefix || had55) ? '55' : '';
+      const remainder = had55 ? clean.slice(2) : clean;
+      let ddd = '';
+      let local = remainder;
+      if (remainder.length >= 10) {
+        ddd = remainder.slice(0, 2);
+        local = remainder.slice(2);
+      } else if (autoFillDDD && selectedDDD) {
+        ddd = String(selectedDDD);
+        local = remainder;
       }
-      // inserir o 9 naquela posição
-      return clean.slice(0, index) + '9' + clean.slice(index);
+      const localNo9 = local.startsWith('9') ? local.slice(1) : local;
+      const without9 = `${country}${ddd}${localNo9}`;
+      const with9 = `${country}${ddd}9${localNo9}`;
+      return { with9, without9 };
     };
 
     const awaitIntervalCountdown = async () => {
@@ -427,14 +561,21 @@ const UploadCSV = ({ onClose }) => {
       setNextCountdown(0);
     };
 
+    // Aguarda enquanto estiver pausado antes de prosseguir com qualquer envio
+    const awaitWhilePaused = async () => {
+      // eslint-disable-next-line no-await-in-loop
+      while (sendingPaused && !sendAbortRef.current) {
+        // pequena espera para evitar busy-loop
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise(r => setTimeout(r, 300));
+      }
+    };
+
     const worker = async () => {
       while (!sendAbortRef.current) {
-        if (sendingPaused) {
-          // aguardar 500ms e checar novamente
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise(r => setTimeout(r, 500));
-          continue;
-        }
+        // Bloqueia o loop se estiver pausado (antes de selecionar próximo item)
+        // eslint-disable-next-line no-await-in-loop
+        await awaitWhilePaused();
 
         // pegar próximo item
         let next;
@@ -447,10 +588,8 @@ const UploadCSV = ({ onClose }) => {
 
         if (!next) break;
 
-        // construir mensagem personalizada
-        const personalized = messageTemplate
-          .replace(/{nome}/g, next.nome || 'Cliente')
-          .replace(/{empresa}/g, next.empresa || '');
+        // construir mensagem personalizada (suporta {nome da coluna})
+        const personalized = renderTemplateMessage(messageTemplate, next);
 
         // Retry automático
         let attempt = 0;
@@ -486,10 +625,13 @@ const UploadCSV = ({ onClose }) => {
           continue;
         }
 
-        const altDigits = validateWithNine ? toggleNineAtPositionFromRight(onlyDigits, 9) : null;
+        const altDigits = (validateWithNine && !sendBothNineVariantsRef.current) ? buildNineVariants(onlyDigits).without9 : null;
 
         while (attempt < maxRetries && !sent && !sendAbortRef.current) {
           try {
+            // Honra pausa antes de cada tentativa de envio
+            // eslint-disable-next-line no-await-in-loop
+            await awaitWhilePaused();
             // eslint-disable-next-line no-await-in-loop
             {
               // Tentativa 1: número original; Tentativa 2: número alternado; Tentativa 3+: volta ao original
@@ -508,9 +650,20 @@ const UploadCSV = ({ onClose }) => {
           } catch (err) {
             attempt += 1;
             lastError = err;
-            // pequeno backoff entre tentativas
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, 2000 * attempt));
+            // pequeno backoff entre tentativas, respeitando pausa
+            const backoffMs = 2000 * attempt;
+            let waited = 0;
+            const step = 200;
+            while (waited < backoffMs && !sendAbortRef.current) {
+              if (sendingPaused) {
+                // eslint-disable-next-line no-await-in-loop
+                await awaitWhilePaused();
+              } else {
+                // eslint-disable-next-line no-await-in-loop
+                await new Promise(r => setTimeout(r, Math.min(step, backoffMs - waited)));
+                waited += step;
+              }
+            }
           }
         }
 
@@ -522,11 +675,14 @@ const UploadCSV = ({ onClose }) => {
           }
         }
 
-        // aguardar intervalo configurado com contagem regressiva
+        // aguardar intervalo configurado com contagem regressiva (honra pausa dentro dele)
         // eslint-disable-next-line no-await-in-loop
         await awaitIntervalCountdown();
       }
 
+      // terminou
+      setSendingEndAt(new Date());
+      setSendingCompleted(true);
       sendWorkerRef.current = null;
     };
 
@@ -543,6 +699,8 @@ const UploadCSV = ({ onClose }) => {
       clearInterval(dbSyncTimerRef.current);
       dbSyncTimerRef.current = null;
     }
+    setSendingEndAt(new Date());
+    setSendingCompleted(true);
   };
 
   // Util: formata segundos em hh:mm:ss
@@ -555,6 +713,35 @@ const UploadCSV = ({ onClose }) => {
     return `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
   };
 
+  // Renderiza a mensagem substituindo variáveis do template por valores da linha
+  const renderTemplateMessage = (template, row) => {
+    if (!template) return '';
+    const lowerRow = {};
+    Object.keys(row || {}).forEach(k => { lowerRow[k.toLowerCase()] = row[k]; });
+    // garantir chaves normalizadas presentes
+    ['nome','empresa','email','telefone'].forEach(k => {
+      if (row && row[k] !== undefined && row[k] !== null) lowerRow[k] = row[k];
+    });
+    // colunas personalizadas
+    (customMappings || []).forEach(mp => {
+      const key = String(mp.name || '').trim().toLowerCase();
+      const src = String(mp.source || '').trim();
+      if (key && src && row && row.hasOwnProperty(src)) {
+        lowerRow[key] = row[src];
+      }
+    });
+    return template.replace(/\{([^}]+)\}/g, (m, p1) => {
+      const key = String(p1 || '').trim().toLowerCase();
+      let val = lowerRow[key];
+      // tentativa via mapeamento se não houver chave direta
+      if ((val === undefined || val === null) && columnMap && columnMap[key]) {
+        const mappedKey = columnMap[key];
+        val = row ? row[mappedKey] : undefined;
+      }
+      return val !== undefined && val !== null ? String(val) : '';
+    });
+  };
+
   const estimatedSecondsRemaining = () => {
     // estimativa simples: quantidade pendente * intervalo (média se aleatório)
     const count = pendingList.length;
@@ -563,6 +750,111 @@ const UploadCSV = ({ onClose }) => {
       return count * (avg || sendIntervalSeconds || 60);
     }
     return count * sendIntervalSeconds;
+  };
+
+  // Desenhar gráfico de donut ao concluir
+  useEffect(() => {
+    if (!sendingCompleted || !donutCanvasRef.current) return;
+    try {
+      const sentCount = sentList.filter(x => x.status === 'sent').length;
+      const errCount = sentList.filter(x => x.status === 'error').length;
+      const ChartLib = require('chart.js/auto');
+      const ctx = donutCanvasRef.current.getContext('2d');
+      if (donutCanvasRef.current._chartInstance) {
+        donutCanvasRef.current._chartInstance.destroy();
+      }
+      donutCanvasRef.current._chartInstance = new ChartLib.Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Enviadas', 'Erros'],
+          datasets: [{
+            data: [sentCount, errCount],
+            backgroundColor: ['#22c55e', '#ef4444'],
+            borderColor: ['#16a34a', '#dc2626']
+          }]
+        },
+        options: { plugins: { legend: { labels: { color: '#ddd' } } } }
+      });
+    } catch (_) {}
+  }, [sendingCompleted, sentList]);
+
+  const downloadFinalReport = async () => {
+    try {
+      const { jsPDF } = await import('jspdf');
+      const ChartLib = await import('chart.js/auto');
+      const sentCount = sentList.filter(x => x.status === 'sent').length;
+      const errCount = sentList.filter(x => x.status === 'error').length;
+      const notSentCount = pendingList.length;
+      const start = sendingStartAt ? new Date(sendingStartAt) : null;
+      const end = sendingEndAt ? new Date(sendingEndAt) : new Date();
+      const elapsedSec = start ? Math.round((end - start) / 1000) : 0;
+
+      const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+
+      // Título
+      doc.setFontSize(18);
+      doc.text('Relatório Final de Envio', 15, 20);
+      // (imagem removida do PDF conforme solicitado)
+
+      // Resumo
+      doc.setFontSize(12);
+      doc.text(`Enviadas: ${sentCount}`, 15, 30);
+      doc.text(`Erros: ${errCount}`, 15, 36);
+      doc.text(`Não enviadas: ${notSentCount}`, 15, 42);
+      doc.text(`Tempo decorrido: ${formatSeconds(elapsedSec)}`, 15, 48);
+
+      // Gráfico donut (3 segmentos) para PDF
+      const leftX = 15; const imgTop = 58; const imgSize = 80; // mm
+      const tmpCanvas = document.createElement('canvas');
+      tmpCanvas.width = 300; tmpCanvas.height = 300;
+      let chartInst = null;
+      try {
+        chartInst = new ChartLib.Chart(tmpCanvas.getContext('2d'), {
+          type: 'doughnut',
+          data: {
+            labels: ['Enviadas', 'Erros', 'Não enviadas'],
+            datasets: [{
+              data: [sentCount, errCount, notSentCount],
+              backgroundColor: ['#22c55e', '#ef4444', '#64748b'],
+              borderColor: ['#16a34a', '#dc2626', '#475569']
+            }]
+          },
+          options: { plugins: { legend: { display: false } } }
+        });
+        const donutDataURL = tmpCanvas.toDataURL('image/png');
+        doc.addImage(donutDataURL, 'PNG', leftX, imgTop, imgSize, imgSize);
+      } catch {}
+      finally {
+        if (chartInst) chartInst.destroy();
+      }
+
+      // Tabela sucinta com últimas 10 linhas
+      doc.setFontSize(12);
+      doc.text('Últimos resultados (até 10):', 15, imgTop + imgSize + 12);
+      const baseY = imgTop + imgSize + 18;
+      const rows = sentList.slice(-10);
+      let y = baseY;
+      doc.setFontSize(10);
+      doc.text('Nome', 15, y);
+      doc.text('Telefone', 65, y);
+      doc.text('Status', 115, y);
+      doc.text('Horário', 155, y);
+      y += 6;
+      rows.forEach(r => {
+        if (y > pageH - 10) { doc.addPage(); y = 15; }
+        doc.text(String(r.nome || '-').slice(0, 28), 15, y);
+        doc.text(String(r.telefone || '-'), 65, y);
+        doc.text(String(r.status || '-'), 115, y);
+        doc.text(String(r.sentAt || '-'), 155, y);
+        y += 6;
+      });
+
+      doc.save('relatorio_final.pdf');
+    } catch (err) {
+      toast.error('Falha ao gerar PDF do relatório final.');
+    }
   };
 
   const estimatedRangeRemaining = () => {
@@ -753,7 +1045,7 @@ const UploadCSV = ({ onClose }) => {
             </div>
 
             {/* Centro: ícone de envio + controles */}
-            <div className="col-span-1 flex flex-col items-center justify-center space-y-4">
+            <div className="col-span-1 flex flex-col items-center justify-start space-y-3 overflow-y-auto max-h-[70vh] p-2">
               <div className="flex flex-col items-center space-y-4">
                 <div className="w-28 h-28 rounded-full bg-primary-500/10 flex items-center justify-center">
                   <Send className="w-12 h-12 text-primary-400" />
@@ -786,11 +1078,32 @@ const UploadCSV = ({ onClose }) => {
                   <button onClick={() => { setShowSendingScreen(false); stopSending(); }} className="px-4 py-2 bg-dark-600 text-white rounded">Fechar</button>
                   </div>
 
-                  <div className="flex items-center space-x-2">
-                    <button onClick={() => downloadCSV(sentList, 'enviadas.csv')} className="px-3 py-2 bg-primary-500 text-white rounded text-sm">Baixar Enviadas</button>
-                    <button onClick={() => downloadCSV(pendingList, 'pendentes.csv')} className="px-3 py-2 bg-dark-600 text-white rounded text-sm">Baixar Pendentes</button>
-                  </div>
+                <div className="flex items-center space-x-2">
+                  <button onClick={() => downloadCSV(sentList, 'enviadas.csv')} className="px-3 py-2 bg-primary-500 text-white rounded text-sm">Baixar Enviadas</button>
+                  <button onClick={() => downloadCSV(pendingList, 'pendentes.csv')} className="px-3 py-2 bg-dark-600 text-white rounded text-sm">Baixar Pendentes</button>
                 </div>
+
+                {sendingCompleted && (
+                  <div className="mt-4 w-full">
+                    <div className="bg-dark-700/50 rounded-lg p-3 flex flex-col items-center mx-auto max-w-md text-center">
+                      <h5 className="text-base font-medium text-white mb-2">Relatório Final</h5>
+                      <div className="flex items-center justify-center">
+                        <img
+                          src={(process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/vid_img/rel_end.jpg` : '/vid_img/rel_end.jpg')}
+                          alt="Relatório"
+                          className="w-28 h-28 rounded object-cover border border-dark-600 mx-auto"
+                        />
+                      </div>
+                      <div className="mt-2 space-y-0.5 leading-tight">
+                        <div className="text-sm text-dark-300">Enviadas: <span className="text-white font-semibold">{sentList.filter(x => x.status === 'sent').length}</span></div>
+                        <div className="text-sm text-dark-300">Erros: <span className="text-white font-semibold">{sentList.filter(x => x.status === 'error').length}</span></div>
+                        <div className="text-sm text-dark-300">Tempo decorrido: <span className="text-white font-semibold">{formatSeconds(Math.max(0, Math.round(((sendingEndAt ? new Date(sendingEndAt) : new Date()) - (sendingStartAt ? new Date(sendingStartAt) : new Date()))/1000)))}</span></div>
+                      </div>
+                      <button onClick={downloadFinalReport} className="mt-2 px-4 py-2 bg-primary-500 text-white rounded text-sm w-full sm:w-auto">Baixar Relatório Final</button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div className="text-sm text-dark-300">
                 Intervalo: <span className="text-white font-semibold">{useRandomInterval ? `${randomIntervalRange.min}s ~ ${randomIntervalRange.max}s` : `${sendIntervalSeconds}s`}</span>
@@ -855,7 +1168,55 @@ const UploadCSV = ({ onClose }) => {
                 </select>
               </div>
             ))}
-
+            <div className="mt-6 pt-4 border-t border-dark-600">
+              <h5 className="text-sm font-medium text-white mb-3">Criar coluna personalizada</h5>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-center">
+                <input
+                  type="text"
+                  placeholder="Nome da coluna (ex: imovel)"
+                  className="input-field"
+                  id="customColNameInput"
+                />
+                <select className="input-field md:col-span-1" id="customColSourceSelect">
+                  <option value="">Fonte da planilha...</option>
+                  {previewData[0] && Object.keys(previewData[0]).map((col) => (
+                    <option key={`src-${col}`} value={col}>{col}</option>
+                  ))}
+                </select>
+                <button
+                  className="px-4 py-2 bg-primary-600 text-white rounded"
+                  onClick={() => {
+                    const nameEl = document.getElementById('customColNameInput');
+                    const srcEl = document.getElementById('customColSourceSelect');
+                    const name = String(nameEl?.value || '').trim();
+                    const source = String(srcEl?.value || '').trim();
+                    if (!name) { toast.error('Digite o nome da coluna personalizada.'); return; }
+                    if (!source) { toast.error('Selecione a coluna da planilha como fonte.'); return; }
+                    if (customMappings.find(m => m.name.toLowerCase() === name.toLowerCase())) {
+                      toast.error('Já existe uma coluna personalizada com esse nome.');
+                      return;
+                    }
+                    setCustomMappings(prev => [...prev, { name, source }]);
+                    if (nameEl) nameEl.value = '';
+                    if (srcEl) srcEl.value = '';
+                  }}
+                >Adicionar</button>
+              </div>
+              {customMappings.length > 0 && (
+                <div className="mt-3 text-sm">
+                  <p className="text-dark-300 mb-2">Personalizadas:</p>
+                  <ul className="space-y-1">
+                    {customMappings.map((m, idx) => (
+                      <li key={`cm-${idx}`} className="flex items-center justify-between bg-dark-600 rounded px-2 py-1">
+                        <span className="text-white">{m.name}</span>
+                        <div className="text-xs text-dark-300">↔ {m.source}</div>
+                        <button className="ml-3 text-red-400 text-xs" onClick={() => setCustomMappings(prev => prev.filter((_,i)=>i!==idx))}>Remover</button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Template da Mensagem */}
@@ -865,16 +1226,32 @@ const UploadCSV = ({ onClose }) => {
               <div>
                 <textarea
                   className="w-full h-32 bg-dark-600 border border-dark-500 rounded-lg p-3 text-white placeholder-dark-400 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 transition-colors"
-                  placeholder="Digite aqui a mensagem que será enviada para os leads. Use {nome} para incluir o nome e {empresa} para incluir a empresa do lead."
+                  placeholder="Digite a mensagem. Use chaves para variáveis: por exemplo {nome}, {empresa} ou qualquer {nome da coluna} presente na planilha."
                   value={messageTemplate}
                   onChange={(e) => setMessageTemplate(e.target.value)}
                 />
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    onClick={handleSaveMessage}
+                    disabled={savingTemplate || !messageTemplate.trim()}
+                    className={`px-4 py-2 rounded ${savingTemplate || !messageTemplate.trim() ? 'bg-dark-600 text-dark-300 cursor-not-allowed' : 'bg-primary-600 text-white hover:bg-primary-500'}`}
+                  >
+                    {savingTemplate ? 'Salvando...' : 'Salvar mensagem'}
+                  </button>
+                </div>
               </div>
               <div className="text-sm text-dark-300">
-                <p className="mb-2">Variáveis disponíveis:</p>
+                <p className="mb-2">Variáveis disponíveis (use entre chaves):</p>
                 <div className="flex flex-wrap gap-2">
-                  <span className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{"{nome}"}</span>
-                  <span className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{"{empresa}"}</span>
+                  {previewData[0] && Object.keys(previewData[0]).map((col) => (
+                    <span key={`col-${col}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{`{${col}}`}</span>
+                  ))}
+                  {['nome','empresa','email','telefone'].map((k) => (
+                    <span key={`std-${k}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{`{${k}}`}</span>
+                  ))}
+                  {customMappings.map((m, idx) => (
+                    <span key={`cmv-${idx}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{`{${m.name}}`}</span>
+                  ))}
                 </div>
               </div>
               <div className="mt-4">
@@ -964,13 +1341,16 @@ const UploadCSV = ({ onClose }) => {
 
       {/* Modal de Confirmação */}
       {showConfirmation && confirmationData && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-dark-800 rounded-lg max-w-lg w-full p-6">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowConfirmation(false)}>
+          <div className="bg-dark-800 rounded-lg max-w-lg w-full p-6 max-h-[85vh] overflow-y-auto relative" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center space-x-3 mb-4">
               <div className="w-10 h-10 bg-yellow-500/20 rounded-full flex items-center justify-center">
                 <AlertTriangle className="w-5 h-5 text-yellow-500" />
               </div>
               <h3 className="text-lg font-semibold text-white">Análise antes do envio</h3>
+              <button aria-label="Fechar" onClick={() => setShowConfirmation(false)} className="ml-auto p-2 rounded hover:bg-dark-700/60">
+                <X className="w-4 h-4 text-dark-200" />
+              </button>
             </div>
             
             <div className="space-y-4 mb-6">
@@ -1038,10 +1418,36 @@ const UploadCSV = ({ onClose }) => {
                       checked={validateWithNine}
                       onChange={(e) => setValidateWithNine(e.target.checked)}
                     />
-                    <span className="text-sm text-white">Validação por 9</span>
+                    <span className="text-sm text-white">Validação por 9 (enviar 2 vezes)</span>
                   </label>
-                  <p className="text-xs text-dark-400 mt-2">Se um envio falhar, tentamos novamente alternando o dígito "9" na 9ª posição a partir da direita (inserir se não houver, remover se já houver).</p>
-                  <p className="text-xs text-dark-400">Só tentamos se o número ainda não tiver sido enviado neste lote.</p>
+                  <p className="text-xs text-dark-400 mt-2">Quando ativado, cada lead recebe duas mensagens: primeiro com o dígito "9" após o DDD e, em seguida, sem o "9".</p>
+                  <p className="text-xs text-dark-400">Ordem automática: variante com 11 dígitos primeiro (provável celular), depois a de 10 dígitos.</p>
+                </div>
+
+                <div className="mt-4">
+                  <label className="inline-flex items-center space-x-3">
+                    <input
+                      type="checkbox"
+                      className="form-checkbox h-4 w-4 text-primary-500"
+                      checked={autoFillDDD}
+                      onChange={(e) => setAutoFillDDD(e.target.checked)}
+                    />
+                    <span className="text-sm text-white">Auto preenchimento de DDD</span>
+                  </label>
+                  <p className="text-xs text-dark-400 mt-2">Se o número tiver 8 ou 9 dígitos, adicionamos automaticamente o DDD selecionado.</p>
+                  <div className="mt-2">
+                    <select
+                      className="input-field w-full"
+                      disabled={!autoFillDDD}
+                      value={selectedDDD}
+                      onChange={(e) => setSelectedDDD(e.target.value)}
+                    >
+                      <option value="">Selecione o DDD...</option>
+                      {DDD_LIST.map(opt => (
+                        <option key={opt.value + opt.label} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
 

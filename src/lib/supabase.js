@@ -64,6 +64,40 @@ export const database = {
     }
   },
 
+  // Salvar template de mensagem
+  async saveMessageTemplate({ content, title = null }) {
+    try {
+      if (!content || !content.trim()) {
+        return { success: false, error: 'Conteúdo da mensagem vazio' };
+      }
+
+      // Obter usuário autenticado para vincular ao owner_id, se disponível
+      let ownerId = null;
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        ownerId = userData?.user?.id || null;
+      } catch (_) {}
+
+      const payload = {
+        owner_id: ownerId,
+        titulo: title || null,
+        conteudo: content,
+        created_at: new Date().toISOString()
+      };
+
+      const { data, error } = await supabase
+        .from('mensagens_modelos')
+        .insert([payload])
+        .select();
+
+      if (error) throw error;
+      return { success: true, data: data?.[0] };
+    } catch (error) {
+      console.error('Erro ao salvar template de mensagem:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
   // ====== Planilhas (Uploads) ======
   // Criar upload e retornar id
   async createUpload({ ownerId = null, filename, mimeType, fileSize, storagePath = null, source = 'csv', columns = {} }) {
