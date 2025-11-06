@@ -1,6 +1,7 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { X, Upload, FileText, CheckCircle, AlertCircle, Eye, EyeOff, AlertTriangle, Send } from 'lucide-react';
 import { processCSVFile, processXLSXFile } from '../lib/utils';
+import { database } from '../lib/supabase';
 import { wahaApi } from '../lib/waha';
 import toast from 'react-hot-toast';
 
@@ -23,6 +24,9 @@ const UploadCSV = ({ onClose }) => {
   const [messagePreview, setMessagePreview] = useState('');
   // Envio em lote: intervalo e telas de envio
   const [sendIntervalSeconds, setSendIntervalSeconds] = useState(60); // default 1m
+  // Intervalo aleatório (min/max em segundos)
+  const [useRandomInterval, setUseRandomInterval] = useState(false);
+  const [randomIntervalRange, setRandomIntervalRange] = useState({ min: 10, max: 50 });
   const [showSendingScreen, setShowSendingScreen] = useState(false);
   const [pendingList, setPendingList] = useState([]);
   const [sentList, setSentList] = useState([]);
@@ -30,9 +34,12 @@ const UploadCSV = ({ onClose }) => {
   const sendWorkerRef = useRef(null);
   const sendAbortRef = useRef(false);
   const [nextCountdown, setNextCountdown] = useState(0);
+  const [currentIntervalSec, setCurrentIntervalSec] = useState(0);
   const pendingListRef = useRef([]);
   const sentNumbersSetRef = useRef(new Set());
   const maxRetries = 3;
+  const [currentUploadId, setCurrentUploadId] = useState(null);
+  const dbSyncTimerRef = useRef(null);
 
   // Função para gerar prévia da mensagem
   const generateMessagePreview = useMemo(() => {
@@ -237,7 +244,7 @@ const UploadCSV = ({ onClose }) => {
     setShowConfirmation(true);
   };
 
-  // Ao confirmar upload, abrimos a tela de envio e iniciamos o worker (sem banco)
+  // Ao confirmar upload, cria upload no banco (se disponível), insere itens e inicia envio
   const confirmUpload = async () => {
     if (!confirmationData) return;
 
@@ -245,6 +252,17 @@ const UploadCSV = ({ onClose }) => {
     // Fechar modal de confirmação para revelar a tela de envio
     setShowConfirmation(false);
     let startData = [...(confirmationData.data || [])];
+    // Normalizar telefones e aplicar prefixo 55 conforme a escolha atual
+    startData = startData.map(row => {
+      const digits = String(row.telefone || '').replace(/\D/g, '');
+      if (addBrazilPrefix) {
+        if (digits && !digits.startsWith('55')) {
+          const pref = '55' + digits;
+          return { ...row, telefone: pref.length > 50 ? pref.substring(0, 50) : pref };
+        }
+      }
+      return { ...row, telefone: digits };
+    });
     if (removeDuplicates) {
       const seen = new Set();
       const originalLength = startData.length;
@@ -260,6 +278,61 @@ const UploadCSV = ({ onClose }) => {
       const removed = originalLength - startData.length;
       if (removed > 0) toast.success(`Removidos ${removed} números duplicados`);
     }
+    // Tentar criar upload e inserir itens no banco
+    let createdUploadId = null;
+    try {
+      const columns = previewData && previewData[0] ? Object.keys(previewData[0]) : [];
+      const ownerId = null; // Ajuste conforme sua autenticação (auth.uid no Supabase)
+      const createRes = await database.createUpload({
+        ownerId,
+        filename: file?.name || 'planilha.csv',
+        mimeType: file?.type || 'text/csv',
+        fileSize: file?.size || null,
+        storagePath: null,
+        source: file?.name?.toLowerCase()?.endsWith('.xlsx') ? 'xlsx' : 'csv',
+        columns: { headers: columns }
+      });
+      if (createRes.success && createRes.uploadId) {
+        setCurrentUploadId(createRes.uploadId);
+        createdUploadId = createRes.uploadId;
+        // Preparar items no formato do RPC
+        const itemsPayload = startData.map(row => ({
+          nome: row.nome || '',
+          empresa: row.empresa || '',
+          email: row.email || '',
+          telefone: String(row.telefone || '').replace(/\D/g, ''),
+          add_prefix_55: !!addBrazilPrefix,
+          message_template: messageTemplate || ''
+        }));
+        const insertRes = await database.insertUploadItems(createRes.uploadId, itemsPayload);
+        if (insertRes.success) {
+          toast.success(`Upload criado e ${insertRes.inserted} itens inseridos no banco`);
+          // Buscar pendentes da view para usar como base dos painéis
+          const pendRes = await database.getPendingItems(createRes.uploadId, 5000);
+          if (pendRes.success) {
+            const dbPending = (pendRes.data || []).map(x => ({
+              id: x.id,
+              upload_id: x.upload_id,
+              nome: x.nome,
+              empresa: x.empresa,
+              email: x.email,
+              telefone: x.telefone_norm || x.telefone_raw || '',
+              telefone_norm: x.telefone_norm || '',
+              telefone_raw: x.telefone_raw || ''
+            }));
+            startData = dbPending;
+          }
+        } else {
+          toast.error(`Falha ao inserir itens no banco: ${insertRes.error}`);
+        }
+      } else {
+        // Não bloquear o fluxo de envio quando não há sessão no Supabase
+        if (createRes.error) toast.warning(`Sem sessão no banco; envio seguirá sem salvar: ${createRes.error}`);
+      }
+    } catch (err) {
+      console.warn('Integração com Supabase indisponível, seguindo com envio local.', err);
+    }
+
     // Limpa controle de já enviados para este lote
     sentNumbersSetRef.current = new Set();
     pendingListRef.current = startData;
@@ -269,6 +342,51 @@ const UploadCSV = ({ onClose }) => {
     setSendingPaused(false);
     toast.success('Iniciando envio...');
     startSendingWorker();
+
+    // Iniciar sincronização com views (polling) se houver upload no banco
+    if (createdUploadId) {
+      setCurrentUploadId(createdUploadId);
+      if (dbSyncTimerRef.current) clearInterval(dbSyncTimerRef.current);
+      dbSyncTimerRef.current = setInterval(async () => {
+        try {
+          const [pend, sent] = await Promise.all([
+            database.getPendingItems(createdUploadId, 5000),
+            database.getSentItems(createdUploadId, 5000)
+          ]);
+          if (pend.success) {
+            const dbPending = (pend.data || []).map(x => ({
+              id: x.id,
+              upload_id: x.upload_id,
+              nome: x.nome,
+              empresa: x.empresa,
+              email: x.email,
+              telefone: x.telefone_norm || x.telefone_raw || '',
+              telefone_norm: x.telefone_norm || '',
+              telefone_raw: x.telefone_raw || ''
+            }));
+            pendingListRef.current = dbPending;
+            setPendingList(dbPending);
+          }
+          if (sent.success) {
+            const dbSent = (sent.data || []).map(x => ({
+              id: x.id,
+              upload_id: x.upload_id,
+              nome: x.nome,
+              empresa: x.empresa,
+              email: x.email,
+              telefone: x.telefone_norm || x.telefone_raw || '',
+              status: 'sent',
+              message: x.message_rendered || '',
+              sentAt: x.sent_at || new Date().toISOString(),
+              attempts: x.attempts || 1
+            }));
+            setSentList(dbSent);
+          }
+        } catch (e) {
+          // ignora erros de sincronização
+        }
+      }, 2000);
+    }
   };
 
   // Função que processa o envio item a item respeitando o intervalo e permitindo pausa
@@ -292,7 +410,9 @@ const UploadCSV = ({ onClose }) => {
 
     const awaitIntervalCountdown = async () => {
       // aguarda o intervalo e atualiza contagem regressiva visível
-      for (let t = sendIntervalSeconds; t > 0 && !sendAbortRef.current; t--) {
+      const intervalSec = getNextIntervalSeconds();
+      setCurrentIntervalSec(intervalSec);
+      for (let t = intervalSec; t > 0 && !sendAbortRef.current; t--) {
         if (sendingPaused) {
           // se pausado, não avança a contagem; espera e repete o mesmo segundo
           // eslint-disable-next-line no-await-in-loop
@@ -337,12 +457,17 @@ const UploadCSV = ({ onClose }) => {
         let sent = false;
         let lastError = null;
         // validação local: pular números com menos de 7 dígitos
-        const onlyDigits = String(next.telefone || '').replace(/\D/g, '');
+        const baseDigits = next.telefone_norm || next.telefone || '';
+        const onlyDigits = String(baseDigits).replace(/\D/g, '');
         if (!onlyDigits || onlyDigits.length < 7) {
           setSentList(prev => [
             ...prev,
             { ...next, status: 'skipped', reason: 'telefone curto', message: personalized, sentAt: new Date().toISOString(), attempts: 0 }
           ]);
+          // Atualizar no banco
+          if (next.id) {
+            try { await database.markItemSkipped({ itemId: next.id, reason: 'telefone curto' }); } catch {}
+          }
           // aguardar o intervalo e continuar
           // eslint-disable-next-line no-await-in-loop
           await awaitIntervalCountdown();
@@ -374,7 +499,12 @@ const UploadCSV = ({ onClose }) => {
               sentNumbersSetRef.current.add(phoneToUse);
             }
             sent = true;
-            setSentList(prev => [...prev, { ...next, status: 'sent', message: personalized, sentAt: new Date().toISOString(), attempts: attempt + 1 }]);
+            const sentItem = { ...next, status: 'sent', message: personalized, sentAt: new Date().toISOString(), attempts: attempt + 1 };
+            setSentList(prev => [...prev, sentItem]);
+            // Atualizar no banco
+            if (next.id) {
+              try { await database.markItemSent({ itemId: next.id, messageRendered: personalized, attempts: attempt + 1 }); } catch {}
+            }
           } catch (err) {
             attempt += 1;
             lastError = err;
@@ -385,7 +515,11 @@ const UploadCSV = ({ onClose }) => {
         }
 
         if (!sent) {
-          setSentList(prev => [...prev, { ...next, status: 'error', error: (lastError && lastError.message) || String(lastError), message: personalized, attempts: attempt, sentAt: new Date().toISOString() }]);
+          const errItem = { ...next, status: 'error', error: (lastError && lastError.message) || String(lastError), message: personalized, attempts: attempt, sentAt: new Date().toISOString() };
+          setSentList(prev => [...prev, errItem]);
+          if (next.id) {
+            try { await database.markItemError({ itemId: next.id, errorMessage: errItem.error, attempts: attempt }); } catch {}
+          }
         }
 
         // aguardar intervalo configurado com contagem regressiva
@@ -405,6 +539,10 @@ const UploadCSV = ({ onClose }) => {
     sendAbortRef.current = true;
     setSendingPaused(true);
     sendWorkerRef.current = null;
+    if (dbSyncTimerRef.current) {
+      clearInterval(dbSyncTimerRef.current);
+      dbSyncTimerRef.current = null;
+    }
   };
 
   // Util: formata segundos em hh:mm:ss
@@ -418,8 +556,41 @@ const UploadCSV = ({ onClose }) => {
   };
 
   const estimatedSecondsRemaining = () => {
-    // estimativa simples: quantidade pendente * intervalo
-    return pendingList.length * sendIntervalSeconds;
+    // estimativa simples: quantidade pendente * intervalo (média se aleatório)
+    const count = pendingList.length;
+    if (useRandomInterval && randomIntervalRange) {
+      const avg = Math.round(((randomIntervalRange.min || 0) + (randomIntervalRange.max || 0)) / 2);
+      return count * (avg || sendIntervalSeconds || 60);
+    }
+    return count * sendIntervalSeconds;
+  };
+
+  const estimatedRangeRemaining = () => {
+    const count = pendingList.length;
+    if (useRandomInterval && randomIntervalRange) {
+      const minEach = Math.max(1, Math.floor(randomIntervalRange.min || 1));
+      const maxEach = Math.max(minEach, Math.floor(randomIntervalRange.max || 1));
+      const avgEach = Math.round((minEach + maxEach) / 2);
+      return { min: minEach * count, max: maxEach * count, avg: avgEach * count };
+    }
+    const fixed = count * sendIntervalSeconds;
+    return { min: fixed, max: fixed, avg: fixed };
+  };
+
+  const getNextIntervalSeconds = () => {
+    if (!useRandomInterval || !randomIntervalRange) return sendIntervalSeconds;
+    const lo = Math.max(1, Math.floor(randomIntervalRange.min || 1));
+    const hi = Math.max(lo, Math.floor(randomIntervalRange.max || lo));
+    return lo + Math.floor(Math.random() * (hi - lo + 1));
+  };
+
+  const getIntervalSelectValue = () => {
+    if (useRandomInterval) {
+      const min = randomIntervalRange?.min ?? 10;
+      const max = randomIntervalRange?.max ?? 50;
+      return `rand-${min}-${max}`;
+    }
+    return `fixed-${sendIntervalSeconds}`;
   };
 
   // Exportar lista para CSV e forçar download
@@ -591,11 +762,20 @@ const UploadCSV = ({ onClose }) => {
                 <div className="text-sm text-dark-300">Pendentes: <span className="text-white font-semibold">{pendingList.length}</span></div>
                 <div className="text-sm text-dark-300">Enviadas: <span className="text-white font-semibold">{sentList.length}</span></div>
                 <div className="text-sm text-dark-300">Próximo envio em: <span className="text-white font-semibold">{formatSeconds(nextCountdown)}</span></div>
+                <div className="text-xs text-dark-400">Intervalo atual: <span className="text-white">{currentIntervalSec}s</span></div>
               </div>
               </div>
 
                 <div className="flex flex-col items-center space-y-3">
-                  <div className="text-sm text-dark-300">ETA estimado: <span className="text-white font-semibold">{formatSeconds(estimatedSecondsRemaining())}</span></div>
+                  <div className="text-sm text-dark-300">
+                    ETA estimado:
+                    <span className="text-white font-semibold ml-1">{formatSeconds(estimatedRangeRemaining().min)}</span>
+                    {' '}~{' '}
+                    <span className="text-white font-semibold">{formatSeconds(estimatedRangeRemaining().max)}</span>
+                    {useRandomInterval && (
+                      <span className="text-dark-400 ml-1">(média {formatSeconds(estimatedRangeRemaining().avg)})</span>
+                    )}
+                  </div>
                   <div className="flex items-center space-x-2">
                 {!sendingPaused ? (
                   <button onClick={pauseSending} className="px-4 py-2 bg-yellow-500 text-black rounded">Pausar</button>
@@ -613,7 +793,7 @@ const UploadCSV = ({ onClose }) => {
                 </div>
 
               <div className="text-sm text-dark-300">
-                Intervalo: <span className="text-white font-semibold">{sendIntervalSeconds}s</span>
+                Intervalo: <span className="text-white font-semibold">{useRandomInterval ? `${randomIntervalRange.min}s ~ ${randomIntervalRange.max}s` : `${sendIntervalSeconds}s`}</span>
               </div>
             </div>
 
@@ -871,24 +1051,45 @@ const UploadCSV = ({ onClose }) => {
                 </p>
               </div>
               <div className="bg-dark-700/50 rounded-lg p-3 mt-3">
-                <label className="text-sm text-white mb-2 block">Intervalo de envio (opcional):</label>
+                <label className="text-sm text-white mb-2 block">Intervalo de envio:</label>
                 <select
-                  value={sendIntervalSeconds}
-                  onChange={(e) => setSendIntervalSeconds(Number(e.target.value))}
                   className="input-field"
+                  value={getIntervalSelectValue()}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v.startsWith('fixed-')) {
+                      setUseRandomInterval(false);
+                      setSendIntervalSeconds(Number(v.split('-')[1]));
+                    } else {
+                      const parts = v.split('-');
+                      const min = Number(parts[1]);
+                      const max = Number(parts[2]);
+                      setUseRandomInterval(true);
+                      setRandomIntervalRange({ min, max });
+                    }
+                  }}
                 >
-                  <option value={10}>10s</option>
-                  <option value={30}>30s</option>
-                  <option value={60}>1m</option>
-                  <option value={120}>2m</option>
+                  <optgroup label="Fixo">
+                    <option value="fixed-10">10s</option>
+                    <option value="fixed-30">30s</option>
+                    <option value="fixed-60">1m</option>
+                    <option value="fixed-120">2m</option>
+                  </optgroup>
+                  <optgroup label="Aleatório">
+                    <option value="rand-10-50">10s ~ 50s</option>
+                    <option value="rand-30-60">30s ~ 1m</option>
+                    <option value="rand-60-120">1m ~ 2m</option>
+                    <option value="rand-180-300">3m ~ 5m</option>
+                  </optgroup>
                 </select>
-                <p className="text-xs text-dark-400 mt-2">Defina o intervalo entre envios. Padrão 1 minuto.</p>
+                <p className="text-xs text-dark-400 mt-2">Selecione um intervalo fixo ou aleatório. Padrão 1 minuto.</p>
                 <p className="text-xs text-dark-300 mt-1">
                   Estimativa de duração: 
-                  <span className="text-white font-semibold ml-1">
-                    {formatSeconds((confirmationData?.stats?.total || 0) * sendIntervalSeconds)}
-                  </span>
-                  {' '}para {confirmationData?.stats?.total || 0} registros.
+                  <span className="text-white font-semibold ml-1">{formatSeconds(estimatedSecondsRemaining())}</span>
+                  {' '}para {confirmationData?.stats?.total || 0} registros
+                  {useRandomInterval && (
+                    <span className="text-dark-400"> (média entre {randomIntervalRange.min}s e {randomIntervalRange.max}s)</span>
+                  )}.
                 </p>
               </div>
             </div>

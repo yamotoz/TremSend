@@ -1,18 +1,28 @@
 import { createClient } from '@supabase/supabase-js';
+import { getAppConfig } from './appConfig';
 
-// Configurações do Supabase - substitua pelas suas credenciais
-const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || 'https://your-project.supabase.co';
-const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY || 'your-anon-key';
+// Configurações do Supabase com overrides em runtime
+const initial = getAppConfig();
+let supabaseUrl = initial.supabaseUrl;
+let supabaseAnonKey = initial.supabaseAnonKey;
 
 // Debug: verificar se as variáveis estão sendo carregadas
 console.log('=== DEBUG SUPABASE ===');
 console.log('Supabase URL:', supabaseUrl);
 console.log('Supabase Key:', supabaseAnonKey ? 'Carregada' : 'Não carregada');
-console.log('URL válida:', supabaseUrl.includes('xqzojsbjatrvnclybaxf'));
-console.log('Key válida:', supabaseAnonKey.length > 100);
+console.log('URL parece válida:', supabaseUrl.startsWith('http'));
+console.log('Key tamanho:', supabaseAnonKey.length);
 console.log('========================');
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export let supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+export function reloadSupabaseClient() {
+  const cfg = getAppConfig();
+  supabaseUrl = cfg.supabaseUrl;
+  supabaseAnonKey = cfg.supabaseAnonKey;
+  supabase = createClient(supabaseUrl, supabaseAnonKey);
+  console.log('Supabase client recarregado com novas credenciais.');
+}
 
 // Funções auxiliares para o banco de dados
 export const database = {
@@ -51,6 +61,134 @@ export const database = {
         success: false, 
         message: 'Erro de conexão com o servidor'
       };
+    }
+  },
+
+  // ====== Planilhas (Uploads) ======
+  // Criar upload e retornar id
+  async createUpload({ ownerId = null, filename, mimeType, fileSize, storagePath = null, source = 'csv', columns = {} }) {
+    try {
+      // Tentar obter usuário autenticado do Supabase Auth
+      let ownerIdFinal = ownerId;
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        const supaUserId = userData?.user?.id || null;
+        if (!ownerIdFinal && supaUserId) ownerIdFinal = supaUserId;
+      } catch (_) {}
+
+      const { data, error } = await supabase.rpc('criar_upload', {
+        p_owner_id: ownerIdFinal,
+        p_filename: filename,
+        p_mime_type: mimeType || null,
+        p_file_size: fileSize || null,
+        p_storage_path: storagePath || null,
+        p_source: source,
+        p_columns: columns ? JSON.stringify(columns) : JSON.stringify({})
+      });
+      if (error) throw error;
+      return { success: true, uploadId: data };
+    } catch (error) {
+      console.error('Erro ao criar upload:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Inserir itens em lote para um upload
+  async insertUploadItems(uploadId, items) {
+    try {
+      const payload = JSON.stringify(items || []);
+      const { data, error } = await supabase.rpc('inserir_itens_upload', {
+        p_upload_id: uploadId,
+        p_items: payload
+      });
+      if (error) throw error;
+      return { success: true, inserted: data };
+    } catch (error) {
+      console.error('Erro ao inserir itens do upload:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Buscar pendentes por upload via view
+  async getPendingItems(uploadId, limit = 1000) {
+    try {
+      let query = supabase
+        .from('v_upload_pendentes')
+        .select('*')
+        .eq('upload_id', uploadId)
+        .order('id', { ascending: true })
+        .limit(limit);
+      const { data, error } = await query;
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao buscar pendentes:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Buscar enviados por upload via view
+  async getSentItems(uploadId, limit = 1000) {
+    try {
+      let query = supabase
+        .from('v_upload_enviados')
+        .select('*')
+        .eq('upload_id', uploadId)
+        .order('id', { ascending: true })
+        .limit(limit);
+      const { data, error } = await query;
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao buscar enviados:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Marcar item como enviado
+  async markItemSent({ itemId, messageRendered, attempts = 1 }) {
+    try {
+      const { error } = await supabase.rpc('marcar_item_enviado', {
+        p_item_id: itemId,
+        p_message_rendered: messageRendered || null,
+        p_attempts: attempts
+      });
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      console.error('Erro ao marcar item como enviado:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Marcar item com erro
+  async markItemError({ itemId, errorMessage, attempts = 1 }) {
+    try {
+      const { error } = await supabase.rpc('marcar_item_erro', {
+        p_item_id: itemId,
+        p_error_message: errorMessage || null,
+        p_attempts: attempts
+      });
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      console.error('Erro ao marcar item com erro:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Marcar item como pulado
+  async markItemSkipped({ itemId, reason }) {
+    try {
+      const { error } = await supabase.rpc('marcar_item_pulado', {
+        p_item_id: itemId,
+        p_reason: reason || null
+      });
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      console.error('Erro ao marcar item como pulado:', error);
+      return { success: false, error: error.message };
     }
   },
 

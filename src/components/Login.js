@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
-import { database } from '../lib/supabase';
+import { database, supabase } from '../lib/supabase';
 
 const Login = () => {
   const [formData, setFormData] = useState({
@@ -33,6 +33,17 @@ const Login = () => {
       const result = await database.authenticateUser(formData.username, formData.password);
       
       if (result.success) {
+        // Criar sessão no Supabase Auth (anônima) para satisfazer RLS, se habilitado
+        try {
+          const { data: anonSession, error: anonErr } = await supabase.auth.signInAnonymously();
+          if (anonErr) {
+            console.warn('Anon auth não habilitado; RLS pode bloquear inserts.', anonErr.message);
+          } else {
+            console.log('Sessão anônima criada:', !!anonSession?.user);
+          }
+        } catch (e) {
+          console.warn('Falha ao criar sessão auth:', e?.message || e);
+        }
         // Salvar dados do usuário no localStorage
         localStorage.setItem('isAuthenticated', 'true');
         localStorage.setItem('username', result.user.username);

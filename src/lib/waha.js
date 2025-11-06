@@ -3,13 +3,7 @@
 // prefira um proxy no backend para ocultar 'X-Api-Key'.
 
 import axios from 'axios';
-
-const RAW_BASE_URL = process.env.REACT_APP_WAHA_BASE_URL || 'http://localhost:3000';
-const SEND_TEXT_URL = RAW_BASE_URL.endsWith('/api')
-  ? `${RAW_BASE_URL}/sendText`
-  : `${RAW_BASE_URL}/api/sendText`;
-const API_KEY = process.env.REACT_APP_WAHA_API_KEY || '0989e67e6a8e48e991f7a26031e19fb1';
-const DEFAULT_SESSION = process.env.REACT_APP_WAHA_SESSION || 'default';
+import { getAppConfig } from './appConfig';
 
 function normalizePhone(input) {
   const digits = String(input || '').replace(/\D/g, '');
@@ -21,14 +15,33 @@ function normalizePhone(input) {
   return digits;
 }
 
-async function sendText({ session = DEFAULT_SESSION, chatId, text }) {
-  const headers = {
-    'Content-Type': 'application/json',
-    'X-Api-Key': API_KEY
-  };
+function buildEndpoints() {
+  const cfg = getAppConfig();
+  const base = (cfg.wahaBaseUrl || '').replace(/\/$/, '');
+  const sendUrl = base.endsWith('/api') ? `${base}/sendText` : `${base}/api/sendText`;
+  return { sendUrl, apiKey: cfg.wahaApiKey || '', session: cfg.wahaSession || 'default' };
+}
+
+async function sendText({ session, chatId, text }) {
+  const { sendUrl, apiKey } = buildEndpoints();
+  const headers = { 'Content-Type': 'application/json', 'X-Api-Key': apiKey };
   const body = { session, chatId, text };
-  const res = await axios.post(SEND_TEXT_URL, body, { headers });
-  return res.data;
+  try {
+    const res = await axios.post(sendUrl, body, { headers, timeout: 15000 });
+    return res.data;
+  } catch (err) {
+    // Tentar fallback alternando o caminho /api
+    const altUrl = sendUrl.includes('/api/sendText')
+      ? sendUrl.replace('/api/sendText', '/sendText')
+      : sendUrl.replace('/sendText', '/api/sendText');
+    try {
+      const res2 = await axios.post(altUrl, body, { headers, timeout: 15000 });
+      return res2.data;
+    } catch (err2) {
+      const detail = err2?.response?.data || err2?.message || String(err2);
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+  }
 }
 
 export const wahaApi = {
@@ -41,7 +54,8 @@ export const wahaApi = {
     const normalized = normalizePhone(phone);
     const chatId = `${normalized}@c.us`;
     try {
-      const data = await sendText({ session: DEFAULT_SESSION, chatId, text: message, reply_to: null, linkPreview: false, linkPreviewHighQuality: false });
+      const { session } = buildEndpoints();
+      const data = await sendText({ session, chatId, text: message, reply_to: null, linkPreview: false, linkPreviewHighQuality: false });
       return data;
     } catch (err) {
       const detail = err?.response?.data || err?.message || String(err);
