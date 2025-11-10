@@ -1,5 +1,5 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { X, Upload, FileText, CheckCircle, AlertCircle, Eye, EyeOff, AlertTriangle, Send } from 'lucide-react';
+import { X, Upload, FileText, CheckCircle, AlertCircle, Eye, EyeOff, AlertTriangle, Send, Trash2 } from 'lucide-react';
 import { processCSVFile, processXLSXFile } from '../lib/utils';
 import { database } from '../lib/supabase';
 import { wahaApi } from '../lib/waha';
@@ -21,8 +21,18 @@ const UploadCSV = ({ onClose }) => {
   const fileInputRef = useRef(null);
   const [addBrazilPrefix, setAddBrazilPrefix] = useState(false);
   const [messageTemplate, setMessageTemplate] = useState('');
+  const [savedTemplates, setSavedTemplates] = useState([]);
+  const [loadingTemplates, setLoadingTemplates] = useState(false);
+  const [templatesError, setTemplatesError] = useState(null);
   const [messagePreview, setMessagePreview] = useState('');
   const [savingTemplate, setSavingTemplate] = useState(false);
+  // Arquivos salvos para envio por base64
+  const [savedFiles, setSavedFiles] = useState([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [filesError, setFilesError] = useState(null);
+  const [savingFile, setSavingFile] = useState(false);
+  const [fileToSave, setFileToSave] = useState(null);
+  const [selectedSavedFileId, setSelectedSavedFileId] = useState(null);
   // Envio em lote: intervalo e telas de envio
   const [sendIntervalSeconds, setSendIntervalSeconds] = useState(60); // default 1m
   // Intervalo aleatório (min/max em segundos)
@@ -50,6 +60,52 @@ const UploadCSV = ({ onClose }) => {
   const sendBothNineVariantsRef = useRef(false);
   const donutCanvasRef = useRef(null);
   const [customMappings, setCustomMappings] = useState([]);
+
+  // Envio flexível: estados e refs
+  const [sendTextEnabled, setSendTextEnabled] = useState(true);
+  const [sendFileEnabled, setSendFileEnabled] = useState(false);
+  const [fileMode, setFileMode] = useState('link'); // forçar somente 'link'
+  const [fileUrlForSend, setFileUrlForSend] = useState('');
+  // Novo: envio de imagem por link (preview em alta qualidade)
+  const [sendImageEnabled, setSendImageEnabled] = useState(false);
+  const [imageUrlForSend, setImageUrlForSend] = useState('');
+  const MAX_MEDIA_SIZE = 25 * 1024 * 1024; // 25MB
+
+  // Envio de imagem via link com preview (sem upload de mídia)
+
+  const readFileAsBase64 = (f) => new Promise((resolve, reject) => {
+    try {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const res = reader.result;
+        const base64 = String(res).includes(',') ? String(res).split(',')[1] : String(res);
+        resolve(base64);
+      };
+      reader.onerror = (e) => reject(e);
+      reader.readAsDataURL(f);
+    } catch (e) {
+      reject(e);
+    }
+  });
+
+  const inferMimeFromFilename = (name) => {
+    const n = String(name || '').toLowerCase();
+    if (n.endsWith('.pdf')) return 'application/pdf';
+    if (n.endsWith('.jpg') || n.endsWith('.jpeg')) return 'image/jpeg';
+    if (n.endsWith('.png')) return 'image/png';
+    if (n.endsWith('.gif')) return 'image/gif';
+    if (n.endsWith('.webp')) return 'image/webp';
+    if (n.endsWith('.mp4')) return 'video/mp4';
+    if (n.endsWith('.doc')) return 'application/msword';
+    if (n.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    if (n.endsWith('.xls')) return 'application/vnd.ms-excel';
+    if (n.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (n.endsWith('.csv')) return 'text/csv';
+    return '';
+  };
+
+  // Converte imagem para JPEG base64 no cliente (se necessário)
+  // (sem conversão/parse de imagem)
 
   // Lista de DDDs (rótulos conforme solicitado)
   const DDD_LIST = [
@@ -134,6 +190,8 @@ const UploadCSV = ({ onClose }) => {
         toast.error(error || 'Falha ao salvar a mensagem.');
       } else {
         toast.success('Mensagem salva com sucesso!');
+        // Recarregar lista de templates
+        await loadSavedTemplates();
       }
     } catch (err) {
       toast.error(`Erro ao salvar: ${err.message}`);
@@ -141,6 +199,131 @@ const UploadCSV = ({ onClose }) => {
       setSavingTemplate(false);
     }
   };
+
+  // Excluir template salvo
+  const handleDeleteTemplate = async (id) => {
+    if (!id) return;
+    const ok = window.confirm('Apagar esta mensagem salva?');
+    if (!ok) return;
+    try {
+      const { success, error } = await database.deleteMessageTemplate(id);
+      if (!success) {
+        toast.error(error || 'Não foi possível apagar a mensagem.');
+        setTemplatesError(error || 'Falha ao excluir.');
+      } else {
+        toast.success('Mensagem apagada.');
+        await loadSavedTemplates();
+      }
+    } catch (e) {
+      toast.error(e.message || String(e));
+      setTemplatesError(e.message || String(e));
+    }
+  };
+
+  // Carregar arquivos salvos (base64)
+  const loadSavedFiles = async () => {
+    try {
+      setLoadingFiles(true);
+      setFilesError(null);
+      const { success, data, error } = await database.getMessageFiles(50);
+      if (!success) {
+        setFilesError(error || 'Não foi possível carregar arquivos salvos.');
+        setSavedFiles([]);
+      } else {
+        setSavedFiles(Array.isArray(data) ? data : []);
+      }
+    } catch (e) {
+      setFilesError(e.message || String(e));
+    } finally {
+      setLoadingFiles(false);
+    }
+  };
+
+  // Carregar templates salvos
+  const loadSavedTemplates = async () => {
+    try {
+      setLoadingTemplates(true);
+      setTemplatesError(null);
+      const { success, data, error } = await database.getMessageTemplates(50);
+      if (!success) {
+        setTemplatesError(error || 'Não foi possível carregar mensagens salvas.');
+        setSavedTemplates([]);
+      } else {
+        setSavedTemplates(Array.isArray(data) ? data : []);
+      }
+    } catch (e) {
+      setTemplatesError(e.message || String(e));
+    } finally {
+      setLoadingTemplates(false);
+    }
+  };
+
+  // Carregar ao montar e quando abrir o editor
+  useEffect(() => {
+    if (sendTextEnabled) {
+      loadSavedTemplates();
+    }
+  }, [sendTextEnabled]);
+
+  // Carregar arquivos salvos quando habilitar envio de arquivo
+  useEffect(() => {
+    if (sendFileEnabled) {
+      loadSavedFiles();
+    }
+  }, [sendFileEnabled]);
+
+  // (sem carregamento de imagens salvas)
+
+  const handleSaveFileToDatabase = async () => {
+    try {
+      if (!fileToSave) {
+        toast.error('Selecione um arquivo para salvar.');
+        return;
+      }
+      if (fileToSave.size > MAX_MEDIA_SIZE) {
+        toast.error('Arquivo excede o limite de 25MB.');
+        return;
+      }
+      setSavingFile(true);
+      const base64 = await readFileAsBase64(fileToSave);
+      const { success, error } = await database.saveMessageFile({
+        filename: fileToSave.name || 'arquivo',
+        mimetype: fileToSave.type || inferMimeFromFilename(fileToSave.name) || null,
+        size: fileToSave.size || null,
+        dataBase64: base64
+      });
+      if (!success) {
+        toast.error(error || 'Falha ao salvar arquivo.');
+      } else {
+        toast.success('Arquivo salvo com sucesso!');
+        setFileToSave(null);
+        await loadSavedFiles();
+      }
+    } catch (e) {
+      toast.error(e.message || String(e));
+    } finally {
+      setSavingFile(false);
+    }
+  };
+
+  const handleDeleteSavedFile = async (id) => {
+    const ok = window.confirm('Apagar este arquivo salvo?');
+    if (!ok) return;
+    try {
+      const { success, error } = await database.deleteMessageFile(id);
+      if (!success) {
+        toast.error(error || 'Não foi possível apagar o arquivo.');
+      } else {
+        toast.success('Arquivo apagado.');
+        if (selectedSavedFileId === id) setSelectedSavedFileId(null);
+        await loadSavedFiles();
+      }
+    } catch (e) {
+      toast.error(e.message || String(e));
+    }
+  };
+
+  // (sem salvar/apagar imagens)
 
   // Preview derivado com base no mapeamento atual
   const mappedPreview = useMemo(() => {
@@ -330,6 +513,32 @@ const UploadCSV = ({ onClose }) => {
   // Ao confirmar upload, cria upload no banco (se disponível), insere itens e inicia envio
   const confirmUpload = async () => {
     if (!confirmationData) return;
+
+    // Validações do envio flexível
+    if (!sendTextEnabled && !sendFileEnabled && !sendImageEnabled) {
+      toast.error('Selecione ao menos uma opção: texto, arquivo ou imagem.');
+      return;
+    }
+    if (sendTextEnabled) {
+      if (!String(messageTemplate || '').trim()) {
+        toast.error('Texto marcado, mas a mensagem está vazia.');
+        return;
+      }
+    }
+  if (sendFileEnabled) {
+      const url = String(fileUrlForSend || '').trim();
+      if (!url || !/^https?:\/\//i.test(url)) {
+        toast.error('Informe uma URL válida (https://...) para enviar arquivo (link).');
+        return;
+      }
+    }
+    if (sendImageEnabled) {
+      const urlImg = String(imageUrlForSend || '').trim();
+      if (!urlImg || !/^https?:\/\//i.test(urlImg)) {
+        toast.error('Informe uma URL válida (https://...) para enviar imagem (link).');
+        return;
+      }
+    }
 
     // Abrir tela de envio imediatamente (o usuário solicitou que a tela abra na segunda confirmação)
     // Fechar modal de confirmação para revelar a tela de envio
@@ -627,6 +836,10 @@ const UploadCSV = ({ onClose }) => {
 
         const altDigits = (validateWithNine && !sendBothNineVariantsRef.current) ? buildNineVariants(onlyDigits).without9 : null;
 
+        // Flags para controlar sucesso de texto/arquivo(imagem) por link entre tentativas
+        let textDone = !sendTextEnabled;
+        let linkDone = !sendFileEnabled; // arquivo por link
+        let imageDone = !sendImageEnabled; // imagem por link
         while (attempt < maxRetries && !sent && !sendAbortRef.current) {
           try {
             // Honra pausa antes de cada tentativa de envio
@@ -637,15 +850,39 @@ const UploadCSV = ({ onClose }) => {
               // Tentativa 1: número original; Tentativa 2: número alternado; Tentativa 3+: volta ao original
               const useAltNow = validateWithNine && attempt === 1 && altDigits && !sentNumbersSetRef.current.has(altDigits);
               const phoneToUse = useAltNow ? altDigits : onlyDigits;
-              await wahaApi.sendMessage(phoneToUse, personalized);
-              sentNumbersSetRef.current.add(phoneToUse);
+              // Enviar texto se habilitado e ainda não enviado
+              if (!textDone) {
+                await wahaApi.sendMessage(phoneToUse, personalized);
+                textDone = true;
+              }
+              // Enviar link de arquivo como texto com preview
+              if (!linkDone) {
+                const urlText = String(fileUrlForSend || '').trim();
+                // envia como sendText com preview (usa sendLinkMessage internamente)
+                await wahaApi.sendLinkMessage(phoneToUse, urlText);
+                linkDone = true;
+              }
+              // Enviar link de imagem como texto com preview (alta qualidade)
+              if (!imageDone) {
+                const urlImgText = String(imageUrlForSend || '').trim();
+                await wahaApi.sendLinkMessage(phoneToUse, urlImgText);
+                imageDone = true;
+              }
+              // Se ambos concluídos (conforme seleção), marcar como enviado
+              if (textDone && linkDone && imageDone) {
+                sentNumbersSetRef.current.add(phoneToUse);
+              }
             }
-            sent = true;
-            const sentItem = { ...next, status: 'sent', message: personalized, sentAt: new Date().toISOString(), attempts: attempt + 1 };
+            sent = textDone && linkDone && imageDone;
+            const sentItem = { ...next, status: sent ? 'sent' : 'partial', message: personalized, sentAt: new Date().toISOString(), attempts: attempt + 1 };
             setSentList(prev => [...prev, sentItem]);
             // Atualizar no banco
             if (next.id) {
-              try { await database.markItemSent({ itemId: next.id, messageRendered: personalized, attempts: attempt + 1 }); } catch {}
+              try {
+                if (sent) {
+                  await database.markItemSent({ itemId: next.id, messageRendered: sendTextEnabled ? personalized : '', attempts: attempt + 1 });
+                }
+              } catch {}
             }
           } catch (err) {
             attempt += 1;
@@ -1219,7 +1456,69 @@ const UploadCSV = ({ onClose }) => {
             </div>
           </div>
 
+          {/* Opções de Envio */}
+          <div className="mb-4 p-4 bg-dark-700/50 rounded-lg">
+            <h4 className="text-sm font-medium text-white mb-3">Opções de Envio</h4>
+            <div className="flex flex-wrap items-center gap-6 mb-3">
+              <label className="flex items-center gap-2 text-sm text-white">
+                <input
+                  type="checkbox"
+                  checked={sendTextEnabled}
+                  onChange={(e) => setSendTextEnabled(e.target.checked)}
+                />
+                <span>Enviar mensagem de texto</span>
+              </label>
+              <label className="flex items-center gap-2 text-sm text-white">
+                <input
+                  type="checkbox"
+                  checked={sendFileEnabled}
+                  onChange={(e) => setSendFileEnabled(e.target.checked)}
+                />
+                <span>Enviar arquivo (link)</span>
+              </label>
+              <label className="flex items-center gap-2 text-sm text-white">
+                <input
+                  type="checkbox"
+                  checked={sendImageEnabled}
+                  onChange={(e) => setSendImageEnabled(e.target.checked)}
+                />
+                <span>Enviar imagem (link)</span>
+              </label>
+            </div>
+            {sendFileEnabled && (
+              <div className="mt-2 space-y-4">
+                <div>
+                  <div className="text-sm text-white mb-2">Link do arquivo (URL pública com preview)</div>
+                  <input
+                    type="url"
+                    className="input-field w-full"
+                    placeholder="https://exemplo.com/arquivo.pdf (link direto)"
+                    value={fileUrlForSend}
+                    onChange={(e) => setFileUrlForSend(e.target.value)}
+                  />
+                  <div className="text-xs text-dark-400 mt-1">O link será enviado como texto com preview de alta qualidade.</div>
+                </div>
+              </div>
+            )}
+            {sendImageEnabled && (
+              <div className="mt-2 space-y-4">
+                <div>
+                  <div className="text-sm text-white mb-2">Link da imagem (URL pública com preview)</div>
+                  <input
+                    type="url"
+                    className="input-field w-full"
+                    placeholder="https://exemplo.com/imagem.jpg (link direto)"
+                    value={imageUrlForSend}
+                    onChange={(e) => setImageUrlForSend(e.target.value)}
+                  />
+                  <div className="text-xs text-dark-400 mt-1">A imagem será enviada como texto com preview de alta qualidade.</div>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Template da Mensagem */}
+          {sendTextEnabled && (
           <div className="mb-4 p-4 bg-dark-700/50 rounded-lg">
             <h4 className="text-sm font-medium text-white mb-3">Mensagem para Envio</h4>
             <div className="space-y-3">
@@ -1230,15 +1529,53 @@ const UploadCSV = ({ onClose }) => {
                   value={messageTemplate}
                   onChange={(e) => setMessageTemplate(e.target.value)}
                 />
-                <div className="mt-2 flex items-center gap-2">
-                  <button
-                    onClick={handleSaveMessage}
-                    disabled={savingTemplate || !messageTemplate.trim()}
-                    className={`px-4 py-2 rounded ${savingTemplate || !messageTemplate.trim() ? 'bg-dark-600 text-dark-300 cursor-not-allowed' : 'bg-primary-600 text-white hover:bg-primary-500'}`}
-                  >
-                    {savingTemplate ? 'Salvando...' : 'Salvar mensagem'}
-                  </button>
-                </div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={handleSaveMessage}
+                  disabled={savingTemplate || !messageTemplate.trim()}
+                  className={`px-4 py-2 rounded ${savingTemplate || !messageTemplate.trim() ? 'bg-dark-600 text-dark-300 cursor-not-allowed' : 'bg-primary-600 text-white hover:bg-primary-500'}`}
+                >
+                  {savingTemplate ? 'Salvando...' : 'Salvar mensagem'}
+                </button>
+              </div>
+              {/* Mensagens salvas */}
+              <div className="mt-4">
+                <h5 className="text-sm font-medium text-white mb-2">Mensagens salvas</h5>
+                {loadingTemplates && (
+                  <div className="text-sm text-dark-300">Carregando...</div>
+                )}
+                {templatesError && (
+                  <div className="text-sm text-red-400">{templatesError}</div>
+                )}
+                {!loadingTemplates && !templatesError && (
+                  <div className="space-y-2 max-h-48 overflow-auto pr-2">
+                    {savedTemplates.length === 0 && (
+                      <div className="text-sm text-dark-300">Nenhuma mensagem salva encontrada.</div>
+                    )}
+                    {savedTemplates.map((t) => (
+                      <div key={t.id} className="p-2 bg-dark-600 rounded flex items-center justify-between gap-3">
+                        <div className="text-sm text-dark-200 truncate">
+                          <span className="text-primary-400 mr-2">[{new Date(t.created_at).toLocaleString()}]</span>
+                          {t.titulo ? `${t.titulo}: ` : ''}{t.conteudo}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            className="px-2 py-1 text-xs bg-primary-600 text-white rounded hover:bg-primary-500"
+                            onClick={() => setMessageTemplate(t.conteudo || '')}
+                          >Usar</button>
+                          <button
+                            className="p-1 text-xs bg-red-600 text-white rounded hover:bg-red-500"
+                            title="Apagar"
+                            onClick={() => handleDeleteTemplate(t.id)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               </div>
               <div className="text-sm text-dark-300">
                 <p className="mb-2">Variáveis disponíveis (use entre chaves):</p>
@@ -1262,6 +1599,7 @@ const UploadCSV = ({ onClose }) => {
               </div>
             </div>
           </div>
+          )}
 
           {/* Preview mapeado (como será inserido) */}
           <div className="bg-dark-700/50 rounded-lg overflow-hidden">

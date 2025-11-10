@@ -64,6 +64,93 @@ export const database = {
     }
   },
 
+  // ====== Arquivos de mensagem (Base64) ======
+  async saveMessageFile({ filename, mimetype = null, size = null, dataBase64 }) {
+    try {
+      if (!filename || !dataBase64) {
+        return { success: false, error: 'Arquivo inválido: nome e base64 são obrigatórios.' };
+      }
+      let ownerId = null;
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        ownerId = userData?.user?.id || null;
+      } catch (_) {}
+      const payload = {
+        owner_id: ownerId,
+        filename,
+        mimetype: mimetype || null,
+        size: size || null,
+        data_base64: dataBase64,
+        created_at: new Date().toISOString()
+      };
+      const { data, error } = await supabase
+        .from('mensagens_arquivos')
+        .insert([payload])
+        .select();
+      if (error) throw error;
+      return { success: true, data: data?.[0] };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return { success: false, error: "Tabela 'public.mensagens_arquivos' não encontrada. Execute o script SQL para criar." };
+      }
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return { success: false, error: 'RLS bloqueou o insert. Faça login ou ajuste a policy para permitir anon INSERT.' };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  async getMessageFiles(limit = 50) {
+    try {
+      const { data, error } = await supabase
+        .from('mensagens_arquivos')
+        .select('id, filename, mimetype, size, created_at')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return { success: false, error: "Tabela 'public.mensagens_arquivos' não encontrada. Execute o script SQL para criar." };
+      }
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return { success: false, error: 'RLS bloqueou o select. Faça login ou ajuste a policy para permitir anon SELECT.' };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  async getMessageFileById(id) {
+    try {
+      const { data, error } = await supabase
+        .from('mensagens_arquivos')
+        .select('id, filename, mimetype, size, data_base64')
+        .eq('id', id)
+        .limit(1);
+      if (error) throw error;
+      return { success: true, data: data?.[0] || null };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      return { success: false, error: msg };
+    }
+  },
+
+  async deleteMessageFile(id) {
+    try {
+      const { error } = await supabase
+        .from('mensagens_arquivos')
+        .delete()
+        .eq('id', id);
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      return { success: false, error: msg };
+    }
+  },
+
   // Salvar template de mensagem
   async saveMessageTemplate({ content, title = null }) {
     try {
@@ -94,7 +181,75 @@ export const database = {
       return { success: true, data: data?.[0] };
     } catch (error) {
       console.error('Erro ao salvar template de mensagem:', error);
-      return { success: false, error: error.message };
+      const msg = String(error?.message || error);
+      // Mensagem orientativa quando a tabela não existe no projeto
+      if (msg.includes("schema cache") || msg.includes("not exist") || msg.includes("does not exist")) {
+        return {
+          success: false,
+          error: "Tabela 'public.mensagens_modelos' não encontrada. Abra o Supabase, execute o arquivo 'database-mensagens.sql' no SQL Editor e tente novamente."
+        };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  // Listar templates de mensagens salvos
+  async getMessageTemplates(limit = 50) {
+    try {
+      const { data, error } = await supabase
+        .from('mensagens_modelos')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return {
+          success: false,
+          error: "Tabela 'public.mensagens_modelos' não encontrada. Execute 'database-mensagens.sql' no Supabase para criar a tabela."
+        };
+      }
+      // Possível erro de RLS: usuário não autenticado sem permissão
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return {
+          success: false,
+          error: 'A política de RLS do Supabase bloqueou a consulta. Faça login ou ajuste a policy para permitir anon SELECT.'
+        };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  // Excluir template de mensagem
+  async deleteMessageTemplate(id) {
+    try {
+      if (!id) {
+        return { success: false, error: 'ID inválido para exclusão' };
+      }
+      // Não usar .select() para evitar exigir permission de SELECT durante DELETE (RLS)
+      const { error } = await supabase
+        .from('mensagens_modelos')
+        .delete()
+        .eq('id', id);
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return {
+          success: false,
+          error: "Tabela 'public.mensagens_modelos' não encontrada. Execute 'database-mensagens.sql' no Supabase para criar a tabela."
+        };
+      }
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return {
+          success: false,
+          error: 'A política de RLS do Supabase bloqueou a exclusão. Faça login ou ajuste a policy para permitir anon DELETE.'
+        };
+      }
+      return { success: false, error: msg };
     }
   },
 
