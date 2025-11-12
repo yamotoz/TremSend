@@ -21,10 +21,17 @@ const UploadCSV = ({ onClose }) => {
   const fileInputRef = useRef(null);
   const [addBrazilPrefix, setAddBrazilPrefix] = useState(false);
   const [messageTemplate, setMessageTemplate] = useState('');
+  // Mensagens iniciais adicionais (opcionais)
+  const [sendText2Enabled, setSendText2Enabled] = useState(false);
+  const [sendText3Enabled, setSendText3Enabled] = useState(false);
+  const [messageTemplate2, setMessageTemplate2] = useState('');
+  const [messageTemplate3, setMessageTemplate3] = useState('');
   const [savedTemplates, setSavedTemplates] = useState([]);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [templatesError, setTemplatesError] = useState(null);
   const [messagePreview, setMessagePreview] = useState('');
+  const [messagePreview2, setMessagePreview2] = useState('');
+  const [messagePreview3, setMessagePreview3] = useState('');
   const [savingTemplate, setSavingTemplate] = useState(false);
   // Arquivos salvos para envio por base64
   const [savedFiles, setSavedFiles] = useState([]);
@@ -59,7 +66,12 @@ const UploadCSV = ({ onClose }) => {
   const dbSyncTimerRef = useRef(null);
   const sendBothNineVariantsRef = useRef(false);
   const donutCanvasRef = useRef(null);
-  const [customMappings, setCustomMappings] = useState([]);
+  const [customMappings, setCustomMappings] = useState([{ name: '', source: '' }, { name: '', source: '' }, { name: '', source: '' }]);
+  // Conjuntos de mensagens (1–3) salvos
+  const [savedMessageSets, setSavedMessageSets] = useState([]);
+  const [loadingMessageSets, setLoadingMessageSets] = useState(false);
+  const [messageSetsError, setMessageSetsError] = useState('');
+  const [savingMessageSet, setSavingMessageSet] = useState(false);
 
   // Envio flexível: estados e refs
   const [sendTextEnabled, setSendTextEnabled] = useState(true);
@@ -156,6 +168,54 @@ const UploadCSV = ({ onClose }) => {
     });
   }, [messageTemplate, previewData, columnMap, customMappings]);
 
+  // Prévia da mensagem adicional 2
+  const generateMessagePreview2 = useMemo(() => {
+    if (!messageTemplate2 || !previewData || previewData.length === 0) return '';
+    const firstRow = previewData[0];
+    const lowerRow = {};
+    Object.keys(firstRow).forEach(k => { lowerRow[k.toLowerCase()] = firstRow[k]; });
+    if (columnMap.nome) lowerRow['nome'] = firstRow[columnMap.nome] || '';
+    if (columnMap.empresa) lowerRow['empresa'] = firstRow[columnMap.empresa] || '';
+    if (columnMap.email) lowerRow['email'] = firstRow[columnMap.email] || '';
+    if (columnMap.telefone) lowerRow['telefone'] = String(firstRow[columnMap.telefone] || '').replace(/\D/g, '');
+    (customMappings || []).forEach(mp => {
+      const key = String(mp.name || '').trim().toLowerCase();
+      const src = String(mp.source || '').trim();
+      if (key && src && firstRow.hasOwnProperty(src)) {
+        lowerRow[key] = firstRow[src];
+      }
+    });
+    return messageTemplate2.replace(/\{([^}]+)\}/g, (m, p1) => {
+      const key = String(p1 || '').trim().toLowerCase();
+      const val = lowerRow[key];
+      return val !== undefined && val !== null ? String(val) : '';
+    });
+  }, [messageTemplate2, previewData, columnMap, customMappings]);
+
+  // Prévia da mensagem adicional 3
+  const generateMessagePreview3 = useMemo(() => {
+    if (!messageTemplate3 || !previewData || previewData.length === 0) return '';
+    const firstRow = previewData[0];
+    const lowerRow = {};
+    Object.keys(firstRow).forEach(k => { lowerRow[k.toLowerCase()] = firstRow[k]; });
+    if (columnMap.nome) lowerRow['nome'] = firstRow[columnMap.nome] || '';
+    if (columnMap.empresa) lowerRow['empresa'] = firstRow[columnMap.empresa] || '';
+    if (columnMap.email) lowerRow['email'] = firstRow[columnMap.email] || '';
+    if (columnMap.telefone) lowerRow['telefone'] = String(firstRow[columnMap.telefone] || '').replace(/\D/g, '');
+    (customMappings || []).forEach(mp => {
+      const key = String(mp.name || '').trim().toLowerCase();
+      const src = String(mp.source || '').trim();
+      if (key && src && firstRow.hasOwnProperty(src)) {
+        lowerRow[key] = firstRow[src];
+      }
+    });
+    return messageTemplate3.replace(/\{([^}]+)\}/g, (m, p1) => {
+      const key = String(p1 || '').trim().toLowerCase();
+      const val = lowerRow[key];
+      return val !== undefined && val !== null ? String(val) : '';
+    });
+  }, [messageTemplate3, previewData, columnMap, customMappings]);
+
   // Fechar modal de confirmação com tecla ESC
   useEffect(() => {
     const onEsc = (e) => {
@@ -175,6 +235,14 @@ const UploadCSV = ({ onClose }) => {
   useEffect(() => {
     setMessagePreview(generateMessagePreview);
   }, [generateMessagePreview]);
+
+  useEffect(() => {
+    setMessagePreview2(generateMessagePreview2);
+  }, [generateMessagePreview2]);
+
+  useEffect(() => {
+    setMessagePreview3(generateMessagePreview3);
+  }, [generateMessagePreview3]);
 
   // Salvar mensagem (template) no banco de dados
   const handleSaveMessage = async () => {
@@ -264,6 +332,28 @@ const UploadCSV = ({ onClose }) => {
       loadSavedTemplates();
     }
   }, [sendTextEnabled]);
+
+  // Carregar conjuntos de mensagens ao montar
+  useEffect(() => {
+    const loadSets = async () => {
+      try {
+        setLoadingMessageSets(true);
+        setMessageSetsError('');
+        const res = await database.getMessageSets(100);
+        if (!res.success) {
+          setMessageSetsError(res.error || 'Não foi possível carregar conjuntos.');
+          setSavedMessageSets([]);
+        } else {
+          setSavedMessageSets(Array.isArray(res.data) ? res.data : []);
+        }
+      } catch (e) {
+        setMessageSetsError(String(e?.message || e));
+      } finally {
+        setLoadingMessageSets(false);
+      }
+    };
+    loadSets();
+  }, []);
 
   // Carregar arquivos salvos quando habilitar envio de arquivo
   useEffect(() => {
@@ -522,6 +612,18 @@ const UploadCSV = ({ onClose }) => {
     if (sendTextEnabled) {
       if (!String(messageTemplate || '').trim()) {
         toast.error('Texto marcado, mas a mensagem está vazia.');
+        return;
+      }
+    }
+    if (sendText2Enabled) {
+      if (!String(messageTemplate2 || '').trim()) {
+        toast.error('Mensagem adicional (1.2) ativada, mas está vazia.');
+        return;
+      }
+    }
+    if (sendText3Enabled) {
+      if (!String(messageTemplate3 || '').trim()) {
+        toast.error('Mensagem adicional (1.3) ativada, mas está vazia.');
         return;
       }
     }
@@ -799,6 +901,8 @@ const UploadCSV = ({ onClose }) => {
 
         // construir mensagem personalizada (suporta {nome da coluna})
         const personalized = renderTemplateMessage(messageTemplate, next);
+        const personalized2 = sendText2Enabled ? renderTemplateMessage(messageTemplate2, next) : '';
+        const personalized3 = sendText3Enabled ? renderTemplateMessage(messageTemplate3, next) : '';
 
         // Retry automático
         let attempt = 0;
@@ -837,7 +941,9 @@ const UploadCSV = ({ onClose }) => {
         const altDigits = (validateWithNine && !sendBothNineVariantsRef.current) ? buildNineVariants(onlyDigits).without9 : null;
 
         // Flags para controlar sucesso de texto/arquivo(imagem) por link entre tentativas
-        let textDone = !sendTextEnabled;
+        let text1Done = !sendTextEnabled;
+        let text2Done = !sendText2Enabled;
+        let text3Done = !sendText3Enabled;
         let linkDone = !sendFileEnabled; // arquivo por link
         let imageDone = !sendImageEnabled; // imagem por link
         while (attempt < maxRetries && !sent && !sendAbortRef.current) {
@@ -851,9 +957,17 @@ const UploadCSV = ({ onClose }) => {
               const useAltNow = validateWithNine && attempt === 1 && altDigits && !sentNumbersSetRef.current.has(altDigits);
               const phoneToUse = useAltNow ? altDigits : onlyDigits;
               // Enviar texto se habilitado e ainda não enviado
-              if (!textDone) {
+              if (!text1Done) {
                 await wahaApi.sendMessage(phoneToUse, personalized);
-                textDone = true;
+                text1Done = true;
+              }
+              if (!text2Done) {
+                await wahaApi.sendMessage(phoneToUse, personalized2);
+                text2Done = true;
+              }
+              if (!text3Done) {
+                await wahaApi.sendMessage(phoneToUse, personalized3);
+                text3Done = true;
               }
               // Enviar link de arquivo como texto com preview
               if (!linkDone) {
@@ -869,11 +983,11 @@ const UploadCSV = ({ onClose }) => {
                 imageDone = true;
               }
               // Se ambos concluídos (conforme seleção), marcar como enviado
-              if (textDone && linkDone && imageDone) {
+              if (text1Done && text2Done && text3Done && linkDone && imageDone) {
                 sentNumbersSetRef.current.add(phoneToUse);
               }
             }
-            sent = textDone && linkDone && imageDone;
+            sent = text1Done && text2Done && text3Done && linkDone && imageDone;
             const sentItem = { ...next, status: sent ? 'sent' : 'partial', message: personalized, sentAt: new Date().toISOString(), attempts: attempt + 1 };
             setSentList(prev => [...prev, sentItem]);
             // Atualizar no banco
@@ -980,13 +1094,21 @@ const UploadCSV = ({ onClose }) => {
   };
 
   const estimatedSecondsRemaining = () => {
-    // estimativa simples: quantidade pendente * intervalo (média se aleatório)
-    const count = pendingList.length;
-    if (useRandomInterval && randomIntervalRange) {
-      const avg = Math.round(((randomIntervalRange.min || 0) + (randomIntervalRange.max || 0)) / 2);
-      return count * (avg || sendIntervalSeconds || 60);
+    // Usa pendentes se houver; caso contrário, usa total confirmado (preview)
+    let count = pendingList.length;
+    if (!count || count <= 0) {
+      count = (confirmationData?.stats?.total ?? (previewData?.length ?? 0));
     }
-    return count * sendIntervalSeconds;
+    if (count <= 0) return 0;
+
+    if (useRandomInterval && randomIntervalRange) {
+      const min = Math.max(1, Math.floor(randomIntervalRange.min ?? 1));
+      const max = Math.max(min, Math.floor(randomIntervalRange.max ?? min));
+      const avg = Math.round((min + max) / 2);
+      const base = avg || sendIntervalSeconds || 60;
+      return count * base;
+    }
+    return count * (sendIntervalSeconds || 60);
   };
 
   // Desenhar gráfico de donut ao concluir
@@ -1095,14 +1217,20 @@ const UploadCSV = ({ onClose }) => {
   };
 
   const estimatedRangeRemaining = () => {
-    const count = pendingList.length;
+    let count = pendingList.length;
+    if (!count || count <= 0) {
+      count = (confirmationData?.stats?.total ?? (previewData?.length ?? 0));
+    }
+    if (count <= 0) return { min: 0, max: 0, avg: 0 };
+
     if (useRandomInterval && randomIntervalRange) {
-      const minEach = Math.max(1, Math.floor(randomIntervalRange.min || 1));
-      const maxEach = Math.max(minEach, Math.floor(randomIntervalRange.max || 1));
+      const minEach = Math.max(1, Math.floor(randomIntervalRange.min ?? 1));
+      const maxEach = Math.max(minEach, Math.floor(randomIntervalRange.max ?? minEach));
       const avgEach = Math.round((minEach + maxEach) / 2);
       return { min: minEach * count, max: maxEach * count, avg: avgEach * count };
     }
-    const fixed = count * sendIntervalSeconds;
+    const base = sendIntervalSeconds || 60;
+    const fixed = count * base;
     return { min: fixed, max: fixed, avg: fixed };
   };
 
@@ -1305,6 +1433,14 @@ const UploadCSV = ({ onClose }) => {
                       <span className="text-dark-400 ml-1">(média {formatSeconds(estimatedRangeRemaining().avg)})</span>
                     )}
                   </div>
+                  <div className="text-xs text-dark-400">
+                    {(() => {
+                      const avg = estimatedRangeRemaining().avg;
+                      const end = new Date(Date.now() + (avg * 1000));
+                      const hh = end.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                      return `Pronto em ${hh}`;
+                    })()}
+                  </div>
                   <div className="flex items-center space-x-2">
                 {!sendingPaused ? (
                   <button onClick={pauseSending} className="px-4 py-2 bg-yellow-500 text-black rounded">Pausar</button>
@@ -1385,7 +1521,7 @@ const UploadCSV = ({ onClose }) => {
           {/* Mapeamento minimalista */}
           <div className="mb-4 p-4 bg-dark-700/50 rounded-lg">
             <p className="text-sm text-dark-300 mb-3">Associe as colunas da planilha aos campos do sistema:</p>
-            {['nome','empresa','email','telefone'].map((target) => (
+            {['nome','telefone'].map((target) => (
               <div key={target} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-center mb-3">
                 <label className="text-sm text-white md:text-right md:pr-4 capitalize">
                   {target} {['nome','telefone'].includes(target) && <span className="text-red-400">*</span>}
@@ -1406,53 +1542,43 @@ const UploadCSV = ({ onClose }) => {
               </div>
             ))}
             <div className="mt-6 pt-4 border-t border-dark-600">
-              <h5 className="text-sm font-medium text-white mb-3">Criar coluna personalizada</h5>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-center">
-                <input
-                  type="text"
-                  placeholder="Nome da coluna (ex: imovel)"
-                  className="input-field"
-                  id="customColNameInput"
-                />
-                <select className="input-field md:col-span-1" id="customColSourceSelect">
-                  <option value="">Fonte da planilha...</option>
-                  {previewData[0] && Object.keys(previewData[0]).map((col) => (
-                    <option key={`src-${col}`} value={col}>{col}</option>
-                  ))}
-                </select>
-                <button
-                  className="px-4 py-2 bg-primary-600 text-white rounded"
-                  onClick={() => {
-                    const nameEl = document.getElementById('customColNameInput');
-                    const srcEl = document.getElementById('customColSourceSelect');
-                    const name = String(nameEl?.value || '').trim();
-                    const source = String(srcEl?.value || '').trim();
-                    if (!name) { toast.error('Digite o nome da coluna personalizada.'); return; }
-                    if (!source) { toast.error('Selecione a coluna da planilha como fonte.'); return; }
-                    if (customMappings.find(m => m.name.toLowerCase() === name.toLowerCase())) {
-                      toast.error('Já existe uma coluna personalizada com esse nome.');
-                      return;
-                    }
-                    setCustomMappings(prev => [...prev, { name, source }]);
-                    if (nameEl) nameEl.value = '';
-                    if (srcEl) srcEl.value = '';
-                  }}
-                >Adicionar</button>
-              </div>
-              {customMappings.length > 0 && (
-                <div className="mt-3 text-sm">
-                  <p className="text-dark-300 mb-2">Personalizadas:</p>
-                  <ul className="space-y-1">
-                    {customMappings.map((m, idx) => (
-                      <li key={`cm-${idx}`} className="flex items-center justify-between bg-dark-600 rounded px-2 py-1">
-                        <span className="text-white">{m.name}</span>
-                        <div className="text-xs text-dark-300">↔ {m.source}</div>
-                        <button className="ml-3 text-red-400 text-xs" onClick={() => setCustomMappings(prev => prev.filter((_,i)=>i!==idx))}>Remover</button>
-                      </li>
+              <h5 className="text-sm font-medium text-white mb-3">Colunas opcionais (até 3)</h5>
+              {[0,1,2].map((idx) => (
+                <div key={`opt-${idx}`} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-center mb-3">
+                  <input
+                    type="text"
+                    placeholder={`Nome da coluna opcional ${idx+1}`}
+                    className="input-field"
+                    value={customMappings[idx]?.name || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setCustomMappings(prev => {
+                        const next = [...prev];
+                        next[idx] = { ...(next[idx] || {}), name: val };
+                        return next;
+                      });
+                    }}
+                  />
+                  <select
+                    className="input-field md:col-span-2"
+                    value={customMappings[idx]?.source || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setCustomMappings(prev => {
+                        const next = [...prev];
+                        next[idx] = { ...(next[idx] || {}), source: val };
+                        return next;
+                      });
+                    }}
+                  >
+                    <option value="">Fonte da planilha...</option>
+                    {previewData[0] && Object.keys(previewData[0]).map((col) => (
+                      <option key={`src-${idx}-${col}`} value={col}>{col}</option>
                     ))}
-                  </ul>
+                  </select>
                 </div>
-              )}
+              ))}
+              <p className="text-xs text-dark-400">Estas colunas são opcionais e podem ser referenciadas nas mensagens com {`{nome_da_coluna}`}</p>
             </div>
           </div>
 
@@ -1466,7 +1592,7 @@ const UploadCSV = ({ onClose }) => {
                   checked={sendTextEnabled}
                   onChange={(e) => setSendTextEnabled(e.target.checked)}
                 />
-                <span>Enviar mensagem de texto</span>
+                <span>Enviar mensagem (1)</span>
               </label>
               <label className="flex items-center gap-2 text-sm text-white">
                 <input
@@ -1474,7 +1600,7 @@ const UploadCSV = ({ onClose }) => {
                   checked={sendFileEnabled}
                   onChange={(e) => setSendFileEnabled(e.target.checked)}
                 />
-                <span>Enviar arquivo (link)</span>
+                <span>Enviar arquivo (2)</span>
               </label>
               <label className="flex items-center gap-2 text-sm text-white">
                 <input
@@ -1482,13 +1608,13 @@ const UploadCSV = ({ onClose }) => {
                   checked={sendImageEnabled}
                   onChange={(e) => setSendImageEnabled(e.target.checked)}
                 />
-                <span>Enviar imagem (link)</span>
+                <span>Enviar imagem (3)</span>
               </label>
             </div>
             {sendFileEnabled && (
               <div className="mt-2 space-y-4">
                 <div>
-                  <div className="text-sm text-white mb-2">Link do arquivo (URL pública com preview)</div>
+                  <div className="text-sm text-white mb-2">Link do arquivo (2) — URL pública com preview</div>
                   <input
                     type="url"
                     className="input-field w-full"
@@ -1503,7 +1629,7 @@ const UploadCSV = ({ onClose }) => {
             {sendImageEnabled && (
               <div className="mt-2 space-y-4">
                 <div>
-                  <div className="text-sm text-white mb-2">Link da imagem (URL pública com preview)</div>
+                  <div className="text-sm text-white mb-2">Link da imagem (3) — URL pública com preview</div>
                   <input
                     type="url"
                     className="input-field w-full"
@@ -1517,10 +1643,10 @@ const UploadCSV = ({ onClose }) => {
             )}
           </div>
 
-          {/* Template da Mensagem */}
+          {/* Template da Mensagem (1) */}
           {sendTextEnabled && (
           <div className="mb-4 p-4 bg-dark-700/50 rounded-lg">
-            <h4 className="text-sm font-medium text-white mb-3">Mensagem para Envio</h4>
+            <h4 className="text-sm font-medium text-white mb-3">Mensagem de texto inicial (1)</h4>
             <div className="space-y-3">
               <div>
                 <textarea
@@ -1580,14 +1706,11 @@ const UploadCSV = ({ onClose }) => {
               <div className="text-sm text-dark-300">
                 <p className="mb-2">Variáveis disponíveis (use entre chaves):</p>
                 <div className="flex flex-wrap gap-2">
-                  {previewData[0] && Object.keys(previewData[0]).map((col) => (
-                    <span key={`col-${col}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{`{${col}}`}</span>
+                  {['nome','telefone'].map((k) => (
+                    <span key={`std-${k}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{k}</span>
                   ))}
-                  {['nome','empresa','email','telefone'].map((k) => (
-                    <span key={`std-${k}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{`{${k}}`}</span>
-                  ))}
-                  {customMappings.map((m, idx) => (
-                    <span key={`cmv-${idx}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{`{${m.name}}`}</span>
+                  {customMappings.filter(m => m?.name).map((m, idx) => (
+                    <span key={`cmv-${idx}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{m.name}</span>
                   ))}
                 </div>
               </div>
@@ -1595,6 +1718,155 @@ const UploadCSV = ({ onClose }) => {
                 <h5 className="text-sm font-medium text-white mb-2">Prévia da mensagem:</h5>
                 <div className="p-3 bg-dark-600 rounded-lg text-dark-300 text-sm">
                   {messagePreview || 'Digite uma mensagem para ver a prévia...'}
+                </div>
+              </div>
+
+              {/* Mensagem adicional (1.2) */}
+              <div className="mt-6 border-t border-dark-600 pt-4">
+                <label className="flex items-center gap-2 text-sm text-white mb-2">
+                  <input
+                    type="checkbox"
+                    checked={sendText2Enabled}
+                    onChange={(e) => setSendText2Enabled(e.target.checked)}
+                  />
+                  <span>Ativar mensagem inicial adicional (1.2)</span>
+                </label>
+                {sendText2Enabled && (
+                  <div className="space-y-3">
+                    <textarea
+                      className="w-full h-28 bg-dark-600 border border-dark-500 rounded-lg p-3 text-white placeholder-dark-400 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 transition-colors"
+                      placeholder="Digite a segunda mensagem inicial. Suporta variáveis {nome}, {empresa}, etc."
+                      value={messageTemplate2}
+                      onChange={(e) => setMessageTemplate2(e.target.value)}
+                    />
+                    <div className="p-3 bg-dark-600 rounded-lg text-dark-300 text-sm">
+                      {messagePreview2 || 'Escreva para visualizar a prévia...'}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Mensagem adicional (1.3) */}
+              <div className="mt-6 border-t border-dark-600 pt-4">
+                <label className="flex items-center gap-2 text-sm text-white mb-2">
+                  <input
+                    type="checkbox"
+                    checked={sendText3Enabled}
+                    onChange={(e) => setSendText3Enabled(e.target.checked)}
+                  />
+                  <span>Ativar mensagem inicial adicional (1.3)</span>
+                </label>
+                {sendText3Enabled && (
+                  <div className="space-y-3">
+                    <textarea
+                      className="w-full h-28 bg-dark-600 border border-dark-500 rounded-lg p-3 text-white placeholder-dark-400 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 transition-colors"
+                      placeholder="Digite a terceira mensagem inicial. Suporta variáveis {nome}, etc."
+                      value={messageTemplate3}
+                      onChange={(e) => setMessageTemplate3(e.target.value)}
+                    />
+                    <div className="p-3 bg-dark-600 rounded-lg text-dark-300 text-sm">
+                      {messagePreview3 || 'Escreva para visualizar a prévia...'}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Mensagens salvas (conjuntos) e Variáveis disponíveis movidos para baixo da 1.3 */}
+              <div className="mt-6 border-t border-dark-600 pt-4">
+                <div className="mb-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <button
+                      onClick={async () => {
+                        try {
+                          setSavingMessageSet(true);
+                          const msgs = [];
+                          if (sendTextEnabled && messageTemplate.trim()) msgs.push({ index: 1, text: messageTemplate.trim() });
+                          if (sendText2Enabled && messageTemplate2.trim()) msgs.push({ index: 2, text: messageTemplate2.trim() });
+                          if (sendText3Enabled && messageTemplate3.trim()) msgs.push({ index: 3, text: messageTemplate3.trim() });
+                          if (msgs.length === 0) { toast.error('Adicione ao menos uma mensagem para salvar.'); setSavingMessageSet(false); return; }
+                          const title = `Conjunto ${new Date().toLocaleString()}`;
+                          const res = await database.saveMessageSet({ title, messages: msgs.map(m => m.text) });
+                          if (!res.success) throw new Error(res.error || 'Falha ao salvar conjunto');
+                          toast.success('Conjunto de mensagens salvo!');
+                          // Recarregar lista
+                          const list = await database.getMessageSets(100);
+                          if (list.success) setSavedMessageSets(list.data || []);
+                          setMessageSetsError(list.success ? '' : (list.error || ''));
+                        } catch (err) {
+                          toast.error(String(err?.message || err));
+                        } finally {
+                          setSavingMessageSet(false);
+                        }
+                      }}
+                      disabled={savingMessageSet}
+                      className={`px-4 py-2 rounded ${savingMessageSet ? 'bg-dark-600 text-dark-300 cursor-not-allowed' : 'bg-primary-600 text-white hover:bg-primary-500'}`}
+                    >{savingMessageSet ? 'Salvando...' : 'Salvar conjunto de mensagens'}</button>
+                  </div>
+                  <h5 className="text-sm font-medium text-white mb-2">Conjuntos de mensagens salvos</h5>
+                  {loadingMessageSets && <div className="text-sm text-dark-300">Carregando...</div>}
+                  {messageSetsError && <div className="text-sm text-red-400">{messageSetsError}</div>}
+                  {!loadingMessageSets && !messageSetsError && (
+                    <div className="space-y-2 max-h-48 overflow-auto pr-2">
+                      {savedMessageSets.length === 0 && (
+                        <div className="text-sm text-dark-300">Nenhum conjunto salvo encontrado.</div>
+                      )}
+                      {savedMessageSets.map((t) => {
+                        const count = Array.isArray(t.conteudos) ? t.conteudos.length : (Array.isArray(t.conteudos_json) ? t.conteudos_json.length : (t.count || 0));
+                        const first = Array.isArray(t.conteudos) ? t.conteudos[0] : (Array.isArray(t.conteudos_json) ? t.conteudos_json[0] : t.preview || '');
+                        return (
+                          <div key={t.id} className="p-2 bg-dark-600 rounded flex items-center justify-between gap-3">
+                            <div className="text-sm text-dark-200 truncate">
+                              <span className="text-primary-400 mr-2">[{new Date(t.created_at).toLocaleString()}]</span>
+                              {t.titulo ? `${t.titulo}: ` : ''}{String(first || '').slice(0, 80)}... <span className="text-dark-400">({count} mensagens)</span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                className="px-2 py-1 text-xs bg-primary-600 text-white rounded hover:bg-primary-500"
+                                onClick={() => {
+                                  const arr = Array.isArray(t.conteudos) ? t.conteudos : (Array.isArray(t.conteudos_json) ? t.conteudos_json : []);
+                                  setSendTextEnabled(Boolean(arr[0]));
+                                  setSendText2Enabled(Boolean(arr[1]));
+                                  setSendText3Enabled(Boolean(arr[2]));
+                                  setMessageTemplate(arr[0] || '');
+                                  setMessageTemplate2(arr[1] || '');
+                                  setMessageTemplate3(arr[2] || '');
+                                  toast.success('Conjunto aplicado nas mensagens 1, 2 e 3');
+                                }}
+                              >Usar</button>
+                              <button
+                                className="p-1 text-xs bg-red-600 text-white rounded hover:bg-red-500"
+                                title="Apagar"
+                                onClick={async () => {
+                                  try {
+                                    const del = await database.deleteMessageSet(t.id);
+                                    if (!del.success) throw new Error(del.error || 'Falha ao apagar conjunto');
+                                    setSavedMessageSets(prev => prev.filter(x => x.id !== t.id));
+                                    toast.success('Conjunto apagado');
+                                  } catch (err) {
+                                    toast.error(String(err?.message || err));
+                                  }
+                                }}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-sm text-dark-300">
+                  <p className="mb-2">Variáveis disponíveis (use entre chaves):</p>
+                  <div className="flex flex-wrap gap-2">
+                    {['nome','telefone'].map((k) => (
+                      <span key={`std-${k}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{k}</span>
+                    ))}
+                    {customMappings.filter(m => m?.name).map((m, idx) => (
+                      <span key={`cmv-${idx}`} className="px-2 py-1 bg-dark-600 text-primary-400 rounded">{m.name}</span>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1610,26 +1882,21 @@ const UploadCSV = ({ onClose }) => {
               <table className="w-full">
                 <thead className="bg-dark-800/50">
                   <tr>
-                    {['nome','empresa','email','telefone'].map(h => (
-                      <th key={h} className="px-3 py-2 text-left text-xs font-medium text-dark-300 uppercase">{h}</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-dark-300 uppercase">nome</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-dark-300 uppercase">telefone</th>
+                    {customMappings.filter(m => m?.name).map((m, i) => (
+                      <th key={`custom-h-${i}`} className="px-3 py-2 text-left text-xs font-medium text-dark-300 uppercase">{m.name}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-600">
                   {mappedPreview.map((row, idx) => (
                     <tr key={idx} className="hover:bg-dark-600/50">
-                      <td className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row.nome}>
-                        {row.nome || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row.empresa}>
-                        {row.empresa || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row.email}>
-                        {row.email || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row.telefone}>
-                        {row.telefone || '-'}
-                      </td>
+                      <td className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row.nome}>{row.nome || '-'}</td>
+                      <td className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row.telefone}>{row.telefone || '-'}</td>
+                      {customMappings.filter(m => m?.name && m?.source).map((m, i) => (
+                        <td key={`custom-c-${idx}-${i}`} className="px-3 py-2 text-sm text-dark-300 max-w-xs truncate" title={row[m.name]}>{row[m.name] || '-'}</td>
+                      ))}
                     </tr>
                   ))}
                 </tbody>

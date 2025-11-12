@@ -1,0 +1,1 @@
+const chartjs=require("../dist/chart.cjs"),{Chart:Chart,registerables:registerables}=chartjs;Chart.register(...registerables),module.exports=Object.assign(Chart,chartjs);

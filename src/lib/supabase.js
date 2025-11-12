@@ -253,6 +253,83 @@ export const database = {
     }
   },
 
+  // ====== Conjuntos de mensagens (1–3) ======
+  async saveMessageSet({ title = null, messages = [] }) {
+    try {
+      const arr = Array.isArray(messages) ? messages.filter(x => typeof x === 'string' && x.trim().length > 0) : [];
+      if (arr.length === 0) {
+        return { success: false, error: 'Nenhuma mensagem para salvar no conjunto.' };
+      }
+      let ownerId = null;
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        ownerId = userData?.user?.id || null;
+      } catch (_) {}
+      const payload = {
+        owner_id: ownerId,
+        titulo: title || null,
+        conteudos: arr,
+        created_at: new Date().toISOString()
+      };
+      const { data, error } = await supabase
+        .from('mensagens_conjuntos')
+        .insert([payload])
+        .select();
+      if (error) throw error;
+      return { success: true, data: data?.[0] };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return { success: false, error: "Tabela 'public.mensagens_conjuntos' não encontrada. Execute o script SQL para criar." };
+      }
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return { success: false, error: 'RLS bloqueou o insert. Faça login ou ajuste a policy para permitir anon INSERT.' };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  async getMessageSets(limit = 50) {
+    try {
+      const { data, error } = await supabase
+        .from('mensagens_conjuntos')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return { success: false, error: "Tabela 'public.mensagens_conjuntos' não encontrada. Execute o script SQL para criar." };
+      }
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return { success: false, error: 'RLS bloqueou o select. Faça login ou ajuste a policy para permitir anon SELECT.' };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  async deleteMessageSet(id) {
+    try {
+      const { error } = await supabase
+        .from('mensagens_conjuntos')
+        .delete()
+        .eq('id', id);
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes('schema cache') || msg.includes('not exist') || msg.includes('does not exist')) {
+        return { success: false, error: "Tabela 'public.mensagens_conjuntos' não encontrada. Execute o script SQL para criar." };
+      }
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return { success: false, error: 'RLS bloqueou o delete. Faça login ou ajuste a policy para permitir anon DELETE.' };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
   // ====== Planilhas (Uploads) ======
   // Criar upload e retornar id
   async createUpload({ ownerId = null, filename, mimeType, fileSize, storagePath = null, source = 'csv', columns = {} }) {
