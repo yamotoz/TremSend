@@ -161,7 +161,11 @@ export const database = {
       // Obter usuário autenticado para vincular ao owner_id, se disponível
       let ownerId = null;
       try {
+        // Garantir alguma sessão para RLS (anon, se necessário)
         const { data: userData } = await supabase.auth.getUser();
+        if (!userData?.user) {
+          await supabase.auth.signInAnonymously();
+        }
         ownerId = userData?.user?.id || null;
       } catch (_) {}
 
@@ -196,6 +200,8 @@ export const database = {
   // Listar templates de mensagens salvos
   async getMessageTemplates(limit = 50) {
     try {
+      // Não forçar sessão aqui: policies permitem SELECT para anon e auth
+      // Evita ficar "authenticated" anonimamente e perder policies de anon
       const { data, error } = await supabase
         .from('mensagens_modelos')
         .select('*')
@@ -228,6 +234,7 @@ export const database = {
       if (!id) {
         return { success: false, error: 'ID inválido para exclusão' };
       }
+      // Não alterar sessão: permitir delete como anon (owner_id IS NULL)
       // Não usar .select() para evitar exigir permission de SELECT durante DELETE (RLS)
       const { error } = await supabase
         .from('mensagens_modelos')
@@ -349,7 +356,7 @@ export const database = {
         p_file_size: fileSize || null,
         p_storage_path: storagePath || null,
         p_source: source,
-        p_columns: columns ? JSON.stringify(columns) : JSON.stringify({})
+        p_columns: columns || {}
       });
       if (error) throw error;
       return { success: true, uploadId: data };
@@ -362,7 +369,7 @@ export const database = {
   // Inserir itens em lote para um upload
   async insertUploadItems(uploadId, items) {
     try {
-      const payload = JSON.stringify(items || []);
+      const payload = Array.isArray(items) ? items : [];
       const { data, error } = await supabase.rpc('inserir_itens_upload', {
         p_upload_id: uploadId,
         p_items: payload
@@ -371,7 +378,11 @@ export const database = {
       return { success: true, inserted: data };
     } catch (error) {
       console.error('Erro ao inserir itens do upload:', error);
-      return { success: false, error: error.message };
+      const msg = String(error?.message || error);
+      if (msg.toLowerCase().includes('cannot extract elements from a scalar')) {
+        return { success: false, error: 'Falha ao inserir itens: parâmetro p_items deve ser um array JSON (não string). Atualizado para enviar array automaticamente; tente novamente.' };
+      }
+      return { success: false, error: msg };
     }
   },
 
@@ -407,6 +418,105 @@ export const database = {
       return { success: true, data };
     } catch (error) {
       console.error('Erro ao buscar enviados:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Listar uploads ativos do usuário atual (com pendentes > 0)
+  async getActiveUploads(limit = 50) {
+    try {
+      // Garantir sessão para RLS
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData?.user) {
+          await supabase.auth.signInAnonymously();
+        }
+      } catch (_) {}
+
+      const { data, error } = await supabase
+        .from('uploads')
+        .select('id, filename, counts_pending, counts_sent, counts_error, counts_skipped, created_at, updated_at')
+        .gt('counts_pending', 0)
+        .order('updated_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao buscar uploads ativos:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Listar todos os uploads do usuário (ativos e inativos)
+  async getAllUploads(limit = 50) {
+    try {
+      // Garantir sessão para RLS
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData?.user) {
+          await supabase.auth.signInAnonymously();
+        }
+      } catch (_) {}
+
+      const { data, error } = await supabase
+        .from('uploads')
+        .select('id, filename, counts_pending, counts_sent, counts_error, counts_skipped, created_at, updated_at')
+        .order('updated_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao buscar todos os uploads:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Última atividade (envio/atualização de item) para um upload
+  async getUploadLastActivity(uploadId) {
+    try {
+      const { data, error } = await supabase
+        .from('upload_items')
+        .select('id, sent_at, updated_at')
+        .eq('upload_id', uploadId)
+        .order('sent_at', { ascending: false, nullsFirst: false })
+        .order('updated_at', { ascending: false })
+        .limit(1);
+      if (error) throw error;
+      const item = data?.[0] || null;
+      return { success: true, data: item ? (item.sent_at || item.updated_at || null) : null };
+    } catch (error) {
+      console.error('Erro ao obter última atividade do upload:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Excluir um upload inteiro (remove itens via ON DELETE CASCADE)
+  async deleteUpload(uploadId) {
+    try {
+      if (!uploadId) return { success: false, error: 'ID do upload inválido' };
+      const { error } = await supabase
+        .from('uploads')
+        .delete()
+        .eq('id', uploadId);
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.toLowerCase().includes('row level security') || msg.toLowerCase().includes('rls')) {
+        return { success: false, error: 'RLS bloqueou a exclusão. Faça login como dono do upload.' };
+      }
+      return { success: false, error: msg };
+    }
+  },
+
+  // Estatísticas consolidadas via RPC
+  async getUploadStats(uploadId) {
+    try {
+      const { data, error } = await supabase.rpc('estatisticas_upload', { p_upload_id: uploadId });
+      if (error) throw error;
+      return { success: true, data };
+    } catch (error) {
+      console.error('Erro ao obter estatísticas do upload:', error);
       return { success: false, error: error.message };
     }
   },

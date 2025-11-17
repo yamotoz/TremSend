@@ -23,6 +23,7 @@
     "postbuild": "powershell -Command \"Copy-Item build\\index.html build\\200.html\"",
     "deploy": "npm run build && surge --project ./build --domain tremsend-pt-20251106.surge.sh",
     "test": "react-scripts test",
+    "worker": "node scripts/worker.js",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
@@ -47,5 +48,9 @@
     "autoprefixer": "^10.4.14",
     "postcss": "^8.4.24",
     "tailwindcss": "^3.3.0"
+  }
+  ,
+  "optionalDependencies": {
+    "dotenv": "^16.4.5"
   }
 }
