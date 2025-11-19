@@ -4,7 +4,7 @@ import ProcessProgressModal from './ProcessProgressModal';
 import toast from 'react-hot-toast';
 import UploadCSV from './UploadCSV';
 import { LogOut, User, Trash2 } from 'lucide-react';
-import { database, supabase } from '../lib/supabase';
+import { processStore } from '../lib/processStore';
 
 const Dashboard = () => {
   const [activeModal, setActiveModal] = useState(null);
@@ -32,39 +32,16 @@ const Dashboard = () => {
     }
   }, []);
 
-  // Polling de uploads e atividade recente para detectar "executando"
+  // Subscrição ao store em memória para sincronização em tempo real
   useEffect(() => {
-    let t;
-    const ensureSession = async () => {
-      try {
-        const { data: userData } = await supabase.auth.getUser();
-        if (!userData?.user) {
-          await supabase.auth.signInAnonymously();
-        }
-      } catch (_) {}
-    };
-    const poll = async () => {
-      await ensureSession();
-      const [resAll, resActive] = await Promise.all([
-        database.getAllUploads(50),
-        database.getActiveUploads(50)
-      ]);
-      if (resAll.success) setAllUploads(resAll.data || []);
-      if (resActive.success) setActiveUploads(resActive.data || []);
-
-      // Buscar última atividade por upload (apenas para os que têm pendentes)
-      const targets = (resAll.success ? resAll.data : []).filter(u => (u?.counts_pending || 0) > 0);
-      const activityEntries = await Promise.all(targets.map(async u => {
-        const la = await database.getUploadLastActivity(u.id);
-        return [u.id, la.success ? la.data : null];
-      }));
+    const unsub = processStore.subscribe((summaries) => {
+      setAllUploads(summaries || []);
       const map = {};
-      activityEntries.forEach(([id, ts]) => { map[id] = ts; });
+      (summaries || []).forEach((u) => { map[u.id] = u.last_activity_at || null; });
       setLastActivityMap(map);
-    };
-    poll();
-    t = setInterval(poll, 3000);
-    return () => { if (t) clearInterval(t); };
+      setActiveUploads((summaries || []).filter((u) => (u.counts_pending || 0) > 0 && u.status === 'running'));
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
 
   const handleLogout = () => {
@@ -80,20 +57,15 @@ const Dashboard = () => {
     }
   };
 
-  const handleDeleteUpload = async (uploadId, filename) => {
-    if (!uploadId) return;
-    const ok = window.confirm(`Apagar o processo "${filename || 'upload'}"?\nIsto remove todos os itens associados.`);
+  const handleDeleteUpload = async (processId, filename) => {
+    if (!processId) return;
+    const ok = window.confirm(`Apagar o processo "${filename || 'processo'}"?\nIsto remove todos os itens associados.`);
     if (!ok) return;
     try {
-      const res = await database.deleteUpload(uploadId);
-      if (!res.success) {
-        toast.error(res.error || 'Não foi possível apagar o processo.');
-        return;
-      }
+      processStore.deleteProcess(processId);
       toast.success('Processo apagado.');
-      // Remoção otimista nas listas locais
-      setAllUploads(prev => prev.filter(u => u.id !== uploadId));
-      setActiveUploads(prev => prev.filter(u => u.id !== uploadId));
+      setAllUploads(prev => prev.filter(u => u.id !== processId));
+      setActiveUploads(prev => prev.filter(u => u.id !== processId));
     } catch (e) {
       toast.error(e.message || String(e));
     }
@@ -333,7 +305,7 @@ const Dashboard = () => {
               return base.map(u => {
                 const created = u?.created_at ? new Date(u.created_at) : null;
                 const lastAct = lastActivityMap[u.id] ? new Date(lastActivityMap[u.id]) : null;
-                const isRunning = (u?.counts_pending || 0) > 0 && lastAct && (now - lastAct.getTime()) <= WINDOW_MS;
+                const isRunning = (u?.counts_pending || 0) > 0 && lastAct && (now - lastAct.getTime()) <= WINDOW_MS && u.status === 'running';
                 return (
                   <div
                     key={u.id}
@@ -345,7 +317,7 @@ const Dashboard = () => {
                         onClick={() => setShowProgressUploadId(u.id)}
                         title="Ver progresso"
                       >
-                        <div className="text-dark-100 text-xs sm:text-sm font-medium truncate">{u.filename || 'Upload'}</div>
+                        <div className="text-dark-100 text-xs sm:text-sm font-medium truncate">{u.filename || 'Processo'}</div>
                         <div className="text-dark-300 text-[11px] sm:text-xs">Pendentes: {u.counts_pending} • Enviadas: {u.counts_sent}</div>
                         {created && (
                           <div className="text-dark-400 text-[10px] sm:text-[11px]">Criado: {created.toLocaleDateString()} {created.toLocaleTimeString()}</div>
@@ -385,7 +357,7 @@ const Dashboard = () => {
 
       {/* Progresso do Processo */}
       {showProgressUploadId && (
-        <ProcessProgressModal uploadId={showProgressUploadId} onClose={() => setShowProgressUploadId(null)} />
+        <ProcessProgressModal processId={showProgressUploadId} onClose={() => setShowProgressUploadId(null)} />
       )}
     </div>
   );

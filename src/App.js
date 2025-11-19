@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Toaster } from 'react-hot-toast';
 import Login from './components/Login';
 import Dashboard from './components/Dashboard';
+import Sender from './lib/sender';
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -16,6 +17,8 @@ function App() {
     };
 
     checkAuth();
+    // Restaura o envio em segundo plano, se houver
+    try { Sender.restore?.(); } catch {}
   }, []);
 
   if (loading) {

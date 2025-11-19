@@ -1,37 +1,24 @@
 import React, { useEffect, useState } from 'react';
 import { X, Send, AlertCircle, Clock } from 'lucide-react';
-import { database } from '../lib/supabase';
+import { processStore } from '../lib/processStore';
 
 const fmt = (n) => String(n).padStart(2, '0');
 
-export default function ProcessProgressModal({ uploadId, onClose }) {
+export default function ProcessProgressModal({ processId, onClose }) {
   const [stats, setStats] = useState({ total: 0, pending: 0, sent: 0, error: 0, skipped: 0 });
   const [pending, setPending] = useState([]);
   const [sent, setSent] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [timer, setTimer] = useState(null);
 
   useEffect(() => {
-    let t;
-    const poll = async () => {
-      try {
-        const [st, pend, snt] = await Promise.all([
-          database.getUploadStats(uploadId),
-          database.getPendingItems(uploadId, 500),
-          database.getSentItems(uploadId, 500)
-        ]);
-        if (st.success) setStats(st.data || stats);
-        if (pend.success) setPending(pend.data || []);
-        if (snt.success) setSent(snt.data || []);
-      } catch (_) {}
+    const unsub = processStore.subscribe(() => {
+      setStats(processStore.getStats(processId));
+      setPending(processStore.getPending(processId, 500));
+      setSent(processStore.getSent(processId, 500));
       setLoading(false);
-    };
-    poll();
-    t = setInterval(poll, 2000);
-    setTimer(t);
-    return () => { if (t) clearInterval(t); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uploadId]);
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, [processId]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -41,7 +28,7 @@ export default function ProcessProgressModal({ uploadId, onClose }) {
           <div className="flex items-center gap-2 text-dark-100">
             <Send className="w-5 h-5" />
             <span className="font-semibold">Progresso do Processo</span>
-            <span className="text-dark-300">• Upload ID: {uploadId}</span>
+            <span className="text-dark-300">• ID: {processId}</span>
           </div>
           <button className="p-2 rounded hover:bg-dark-700" onClick={onClose}>
             <X className="w-5 h-5 text-dark-200" />

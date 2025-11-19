@@ -1,10 +1,72 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { X, Upload, FileText, CheckCircle, AlertCircle, Eye, EyeOff, AlertTriangle, Send, Trash2 } from 'lucide-react';
 import { processCSVFile, processXLSXFile } from '../lib/utils';
-import { database, supabase } from '../lib/supabase';
+// Removido uso de Supabase/UUID neste fluxo
+import { processStore } from '../lib/processStore';
 import { wahaApi } from '../lib/waha';
 import { Sender } from '../lib/sender';
 import toast from 'react-hot-toast';
+
+// Stub local para modo sem banco de dados
+// Garante que chamadas antigas a "database.*" não quebrem o build.
+// Todas as operações retornam sucesso e dados vazios, mantendo a UI funcional.
+const database = {
+  // Mensagens (templates)
+  saveMessageTemplate: async ({ content }) => ({ success: true }),
+  deleteMessageTemplate: async (id) => ({ success: true }),
+  getMessageTemplates: async (limit = 50) => ({ success: true, data: [] }),
+
+  // Arquivos salvos (base64)
+  getMessageFiles: async (limit = 50) => ({ success: true, data: [] }),
+  saveMessageFile: async ({ filename, mimetype, size, dataBase64 }) => ({ success: true }),
+  deleteMessageFile: async (id) => ({ success: true }),
+
+  // Conjuntos de mensagens
+  getMessageSets: async (limit = 100) => {
+    try {
+      const raw = window.localStorage.getItem('ts_message_sets') || '[]';
+      let arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) arr = [];
+      // ordenar por created_at desc
+      arr.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      return { success: true, data: arr.slice(0, limit) };
+    } catch (e) {
+      return { success: false, error: String(e?.message || e) };
+    }
+  },
+  saveMessageSet: async ({ title, messages }) => {
+    try {
+      const raw = window.localStorage.getItem('ts_message_sets') || '[]';
+      let arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) arr = [];
+      const id = Date.now();
+      const created_at = new Date().toISOString();
+      const item = { id, titulo: title || `Conjunto ${created_at}`, conteudos: Array.isArray(messages) ? messages : [], created_at };
+      arr.push(item);
+      window.localStorage.setItem('ts_message_sets', JSON.stringify(arr));
+      return { success: true, data: item };
+    } catch (e) {
+      return { success: false, error: String(e?.message || e) };
+    }
+  },
+  deleteMessageSet: async (id) => {
+    try {
+      const raw = window.localStorage.getItem('ts_message_sets') || '[]';
+      let arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) arr = [];
+      arr = arr.filter((x) => String(x.id) !== String(id));
+      window.localStorage.setItem('ts_message_sets', JSON.stringify(arr));
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e?.message || e) };
+    }
+  },
+
+  // Itens do envio
+  markItemSkipped: async ({ itemId, reason }) => ({ success: true }),
+  markItemSent: async ({ itemId, messageRendered, attempts }) => ({ success: true }),
+  markItemError: async ({ itemId, errorMessage, attempts }) => ({ success: true }),
+};
 
 const UploadCSV = ({ onClose }) => {
   const [file, setFile] = useState(null);
@@ -63,8 +125,7 @@ const UploadCSV = ({ onClose }) => {
   const pendingListRef = useRef([]);
   const sentNumbersSetRef = useRef(new Set());
   const maxRetries = 3;
-  const [currentUploadId, setCurrentUploadId] = useState(null);
-  const [isUploadPrepared, setIsUploadPrepared] = useState(false);
+  // Fluxo sem banco: não usamos UUID
   const dbSyncTimerRef = useRef(null);
   const sendBothNineVariantsRef = useRef(false);
   const donutCanvasRef = useRef(null);
@@ -605,212 +666,7 @@ const UploadCSV = ({ onClose }) => {
     setShowConfirmation(true);
   };
 
-  // Preparação: gerar UUID e inserir itens no banco, sem iniciar envio
-  const prepareUploadOnly = async () => {
-    if (!confirmationData) return;
-    if (isUploadPrepared) return;
-
-    // Validações do envio flexível
-    if (!sendTextEnabled && !sendFileEnabled && !sendImageEnabled) {
-      toast.error('Selecione ao menos uma opção: texto, arquivo ou imagem.');
-      return;
-    }
-    if (sendTextEnabled) {
-      if (!String(messageTemplate || '').trim()) {
-        toast.error('Texto marcado, mas a mensagem está vazia.');
-        return;
-      }
-    }
-    if (sendText2Enabled) {
-      if (!String(messageTemplate2 || '').trim()) {
-        toast.error('Mensagem adicional (1.2) ativada, mas está vazia.');
-        return;
-      }
-    }
-    if (sendText3Enabled) {
-      if (!String(messageTemplate3 || '').trim()) {
-        toast.error('Mensagem adicional (1.3) ativada, mas está vazia.');
-        return;
-      }
-    }
-    if (sendFileEnabled) {
-      const url = String(fileUrlForSend || '').trim();
-      if (!url || !/^https?:\/\//i.test(url)) {
-        toast.error('Informe uma URL válida (https://...) para enviar arquivo (link).');
-        return;
-      }
-    }
-    if (sendImageEnabled) {
-      const urlImg = String(imageUrlForSend || '').trim();
-      if (!urlImg || !/^https?:\/\//i.test(urlImg)) {
-        toast.error('Informe uma URL válida (https://...) para enviar imagem (link).');
-        return;
-      }
-    }
-
-    setUploading(true);
-    // Garantir sessão de autenticação Supabase para usar RPCs (criar_upload/inserir_itens_upload)
-    try {
-      let currentUserId = null;
-      try {
-        const { data: userData } = await supabase.auth.getUser();
-        currentUserId = userData?.user?.id || null;
-      } catch (_) {}
-      if (!currentUserId) {
-        const { data: anonSession, error: anonErr } = await supabase.auth.signInAnonymously();
-        if (anonErr) {
-          toast.error(`Falha ao autenticar no Supabase: ${anonErr.message}. Abra a tela "Login" e entre, ou habilite Anonymous Sign-ins no projeto.`);
-        } else {
-          currentUserId = anonSession?.user?.id || null;
-          console.log('Sessão Supabase criada para upload:', currentUserId);
-        }
-      }
-      if (!currentUserId) {
-        // Sem sessão, os RPCs abaixo irão falhar pelo check de auth.uid()
-        setUploading(false);
-        toast.error('Sem sessão de autenticação no Supabase. Faça login pela tela "Login" ou habilite Anonymous Sign-ins.');
-        return;
-      }
-    } catch (authErr) {
-      console.warn('Erro ao verificar/criar sessão Supabase', authErr);
-    }
-    let startData = [...(confirmationData.data || [])];
-    // Normalizar telefones, aplicar auto-DDD e prefixo 55
-    startData = startData.map(row => {
-      const digits = String(row.telefone || '').replace(/\D/g, '');
-      const had55 = digits.startsWith('55');
-      const country = (addBrazilPrefix || had55) ? '55' : '';
-      let base = had55 ? digits.slice(2) : digits;
-      if (autoFillDDD && selectedDDD && base && (base.length === 8 || base.length === 9)) {
-        base = String(selectedDDD) + base;
-      }
-      const final = `${country}${base}`;
-      return { ...row, telefone: final.length > 50 ? final.substring(0, 50) : final };
-    });
-    if (removeDuplicates) {
-      const seen = new Set();
-      const originalLength = startData.length;
-      startData = startData.filter(row => {
-        const d = String(row.telefone || '').replace(/\D/g, '');
-        if (!d) return true;
-        if (seen.has(d)) return false;
-        seen.add(d);
-        return true;
-      });
-      const removed = originalLength - startData.length;
-      if (removed > 0) toast.success(`Removidos ${removed} números duplicados`);
-    }
-
-    let createdUploadId = null;
-    try {
-      const columns = previewData && previewData[0] ? Object.keys(previewData[0]) : [];
-      const ownerId = null;
-      const createRes = await database.createUpload({
-        ownerId,
-        filename: file?.name || 'planilha.csv',
-        mimeType: file?.type || 'text/csv',
-        fileSize: file?.size || null,
-        storagePath: null,
-        source: file?.name?.toLowerCase()?.endsWith('.xlsx') ? 'xlsx' : 'csv',
-        // Inclui configuração de intervalo escolhida pelo usuário para padronizar o upload
-        columns: {
-          headers: columns,
-          interval_config: {
-            useRandomInterval,
-            randomIntervalRange,
-            sendIntervalSeconds
-          }
-        }
-      });
-      if (createRes.success && createRes.uploadId) {
-        setCurrentUploadId(createRes.uploadId);
-        createdUploadId = createRes.uploadId;
-        const itemsPayload = startData.map(row => ({
-          nome: row.nome || '',
-          empresa: row.empresa || '',
-          email: row.email || '',
-          telefone: String(row.telefone || '').replace(/\D/g, ''),
-          add_prefix_55: !!addBrazilPrefix,
-          message_template: messageTemplate || ''
-        }));
-        const insertRes = await database.insertUploadItems(createRes.uploadId, itemsPayload);
-        if (insertRes.success) {
-          toast.success(`Upload criado e ${insertRes.inserted} itens inseridos no banco`);
-          const pendRes = await database.getPendingItems(createRes.uploadId, 5000);
-          if (pendRes.success) {
-            const dbPending = (pendRes.data || []).map(x => ({
-              id: x.id,
-              upload_id: x.upload_id,
-              nome: x.nome,
-              empresa: x.empresa,
-              email: x.email,
-              telefone: x.telefone_norm || x.telefone_raw || '',
-              telefone_norm: x.telefone_norm || '',
-              telefone_raw: x.telefone_raw || ''
-            }));
-            startData = dbPending;
-          }
-        } else {
-          toast.error(`Falha ao inserir itens no banco: ${insertRes.error}`);
-        }
-      } else {
-        if (createRes.error) {
-          toast.error(`Não foi possível criar o upload: ${createRes.error}`);
-        }
-      }
-    } catch (err) {
-      console.warn('Integração com Supabase indisponível.', err);
-    }
-
-    pendingListRef.current = startData;
-    setPendingList(startData);
-    setSentList([]);
-    setIsUploadPrepared(!!createdUploadId);
-    setUploading(false);
-    if (createdUploadId) {
-      toast.success('UUID gerado. Agora clique em "Começar envio"');
-      if (dbSyncTimerRef.current) clearInterval(dbSyncTimerRef.current);
-      dbSyncTimerRef.current = setInterval(async () => {
-        try {
-          const [pend, sent] = await Promise.all([
-            database.getPendingItems(createdUploadId, 5000),
-            database.getSentItems(createdUploadId, 5000)
-          ]);
-          if (pend.success) {
-            const dbPending = (pend.data || []).map(x => ({
-              id: x.id,
-              upload_id: x.upload_id,
-              nome: x.nome,
-              empresa: x.empresa,
-              email: x.email,
-              telefone: x.telefone_norm || x.telefone_raw || '',
-              telefone_norm: x.telefone_norm || '',
-              telefone_raw: x.telefone_raw || ''
-            }));
-            pendingListRef.current = dbPending;
-            setPendingList(dbPending);
-          }
-          if (sent.success) {
-            const dbSent = (sent.data || []).map(x => ({
-              id: x.id,
-              upload_id: x.upload_id,
-              nome: x.nome,
-              empresa: x.empresa,
-              email: x.email,
-              telefone: x.telefone_norm || x.telefone_raw || '',
-              status: 'sent',
-              message: x.message_rendered || '',
-              sentAt: x.sent_at || new Date().toISOString(),
-              attempts: x.attempts || 1
-            }));
-            setSentList(dbSent);
-          }
-        } catch (e) {}
-      }, 2000);
-    } else {
-      toast.error('Não foi possível gerar o UUID. Verifique a sessão de autenticação (Login/Anonymous) e as credenciais do Supabase.');
-    }
-  };
+  // Removida etapa "Preparar base" — começamos direto no botão "Começar envio"
 
   // Ao confirmar upload, inicia o envio usando a base preparada
   const confirmUpload = async () => {
@@ -894,11 +750,19 @@ const UploadCSV = ({ onClose }) => {
     setSendingCompleted(false);
     setSendingStartAt(new Date());
     setSendingEndAt(null);
-    const startingWithoutUUID = !isUploadPrepared || !currentUploadId;
-    toast.success(startingWithoutUUID ? 'Iniciando envio sem banco (modo memória)...' : 'Iniciando envio em segundo plano...');
+    toast.success('Iniciando envio sem banco (modo memória)...');
     try {
+      const processId = processStore.createProcess({
+        filename: file?.name || 'planilha.csv',
+        items: expandedData,
+        config: {
+          useRandomInterval,
+          randomIntervalRange,
+          sendIntervalSeconds,
+        }
+      });
       Sender.start({
-        uploadId: currentUploadId || null,
+        processId,
         items: expandedData,
         sendTextEnabled,
         sendText2Enabled,
@@ -915,7 +779,39 @@ const UploadCSV = ({ onClose }) => {
         sendIntervalSeconds,
         maxRetries,
         onWaitStart: (sec) => { setCurrentIntervalSec(sec); },
-        onWaitTick: (t) => { setNextCountdown(t); }
+        onWaitTick: (t) => { setNextCountdown(t); },
+        onItemSent: (item, extras) => {
+          // atualiza listas locais com status explícito
+          setSentList(prev => [{ ...(item || {}), ...(extras || {}), status: 'sent' }, ...prev]);
+          const idA = String(item.telefone_norm || item.telefone || item.id || '');
+          pendingListRef.current = pendingListRef.current.filter((x) => {
+            const idB = String(x.telefone_norm || x.telefone || x.id || '');
+            return idA !== idB;
+          });
+          setPendingList([...pendingListRef.current]);
+          // se acabou, marca conclusão e fim
+          if (!pendingListRef.current || pendingListRef.current.length === 0) {
+            setSendingEndAt(new Date());
+            setSendingCompleted(true);
+            toast.success('Envio concluído. Relatório final disponível.');
+          }
+        },
+        onItemError: (item, err) => {
+          setSentList(prev => [{ ...(item || {}), status: 'error', error: String(err?.message || err), sentAt: new Date().toISOString(), attempts: (item?.attempts || 0) }, ...prev]);
+          // remove também dos pendentes para que a fila avance
+          const idA = String(item.telefone_norm || item.telefone || item.id || '');
+          pendingListRef.current = pendingListRef.current.filter((x) => {
+            const idB = String(x.telefone_norm || x.telefone || x.id || '');
+            return idA !== idB;
+          });
+          setPendingList([...pendingListRef.current]);
+          // se acabou, marca conclusão e fim
+          if (!pendingListRef.current || pendingListRef.current.length === 0) {
+            setSendingEndAt(new Date());
+            setSendingCompleted(true);
+            toast('Envio encerrado com erros. Baixe o relatório final.');
+          }
+        }
       });
     } catch (err) {
       toast.error('Falha ao iniciar envio em segundo plano: ' + (err.message || String(err)));
@@ -1510,38 +1406,13 @@ const UploadCSV = ({ onClose }) => {
                 <div className="w-28 h-28 rounded-full bg-primary-500/10 flex items-center justify-center">
                   <Send className="w-12 h-12 text-primary-400" />
                 </div>
-              <div className="text-center">
+                <div className="text-center">
                 <div className="text-sm text-dark-300">Pendentes: <span className="text-white font-semibold">{pendingList.length}</span></div>
-                <div className="text-sm text-dark-300">Enviadas: <span className="text-white font-semibold">{sentList.length}</span></div>
+                <div className="text-sm text-dark-300">Enviadas: <span className="text-white font-semibold">{sentList.filter(x => x.status === 'sent').length}</span></div>
+                <div className="text-sm text-dark-300">Erros: <span className="text-white font-semibold">{sentList.filter(x => x.status === 'error').length}</span></div>
                 <div className="text-sm text-dark-300">Próximo envio em: <span className="text-white font-semibold">{formatSeconds(nextCountdown)}</span></div>
                 <div className="text-xs text-dark-400">Intervalo atual: <span className="text-white">{currentIntervalSec}s</span></div>
-                <div className="mt-2 flex items-center justify-center gap-2 text-[11px]">
-                  <span className="text-dark-300">Upload ID:</span>
-                  {currentUploadId ? (
-                    <>
-                      <code className="px-2 py-0.5 bg-dark-700 text-primary-300 rounded select-text break-all">{currentUploadId}</code>
-                      <button
-                        className="px-2 py-0.5 bg-primary-600 text-white rounded hover:bg-primary-500"
-                        onClick={() => {
-                          try { navigator.clipboard.writeText(currentUploadId); toast.success('UUID copiado'); } catch { toast.error('Falha ao copiar'); }
-                        }}
-                      >
-                        Copiar
-                      </button>
-                    </>
-                  ) : (
-                    !isUploadPrepared ? (
-                      <span className="px-2 py-0.5 bg-yellow-600/20 text-yellow-300 rounded">Modo sem banco</span>
-                    ) : (
-                      <span className="text-dark-400">(gerando...)</span>
-                    )
-                  )}
-                </div>
-                {!isUploadPrepared && (
-                  <div className="mt-2 text-xs text-yellow-400">
-                    Enviando em memória: sem registro no banco e sem sincronização de status.
-                  </div>
-                )}
+                <div className="mt-2 text-[11px] text-dark-300">Modo sem banco</div>
               </div>
               </div>
 
@@ -1608,13 +1479,16 @@ const UploadCSV = ({ onClose }) => {
             {/* Direita: preview sendo criado (enviadas) */}
             <div className="col-span-1 bg-dark-800/40 rounded-lg p-3 overflow-y-auto max-h-[70vh]">
               <h4 className="text-sm font-medium text-white mb-3">Mensagens Enviadas</h4>
-              <div className="text-xs text-dark-300 mb-2">Total: {sentList.length}</div>
+              <div className="text-xs text-dark-300 mb-2">Total: {sentList.filter(x => x.status === 'sent').length}</div>
               <ul className="space-y-2">
-                {sentList.map((item, idx) => (
+                {sentList.filter(x => x.status === 'sent').map((item, idx) => (
                   <li key={idx} className={`p-2 rounded ${item.status === 'sent' ? 'bg-dark-700/30' : 'bg-red-700/20'}`}>
                     <div className="text-sm text-white truncate">{item.nome || '-' } • {item.telefone}</div>
                     <div className="text-xs text-dark-300 mt-1">{item.message}</div>
-                    <div className="text-xs text-dark-400 mt-1">{item.status === 'sent' ? `Enviado em ${new Date(item.sentAt).toLocaleString()}` : `Erro: ${item.error}`}</div>
+                    <div className="text-xs text-dark-400 mt-1">
+                      {item.status === 'sent' && `Enviado em ${new Date(item.sentAt).toLocaleString()}`}
+                      {/* painel de enviados exibe apenas sucesso */}
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -2182,23 +2056,8 @@ const UploadCSV = ({ onClose }) => {
                 <p className="text-sm text-dark-300">
                   Total de registros: <span className="text-white font-semibold">{confirmationData.stats.total}</span>
                 </p>
-                <div className="mt-2 flex items-center gap-2 text-xs">
-                  <span className="text-dark-300">Upload ID (UUID):</span>
-                  {currentUploadId ? (
-                    <>
-                      <code className="px-2 py-1 bg-dark-600 text-primary-300 rounded select-text break-all">{currentUploadId}</code>
-                      <button
-                        className="px-2 py-1 bg-primary-600 text-white rounded hover:bg-primary-500"
-                        onClick={() => {
-                          try { navigator.clipboard.writeText(currentUploadId); toast.success('UUID copiado'); } catch { toast.error('Falha ao copiar'); }
-                        }}
-                      >
-                        Copiar
-                      </button>
-                    </>
-                  ) : (
-                    <span className="text-dark-400">será gerado ao clicar em "Gerar UUID"</span>
-                  )}
+                <div className="mt-2 text-xs text-dark-300">
+                  Modo sem banco ativo. Os envios serão gerenciados em memória com sincronização em tempo real no painel.
                 </div>
               </div>
               <div className="bg-dark-700/50 rounded-lg p-3 mt-3">
@@ -2252,13 +2111,7 @@ const UploadCSV = ({ onClose }) => {
               >
                 Cancelar
               </button>
-              <button
-                onClick={prepareUploadOnly}
-                disabled={uploading || isUploadPrepared}
-                className="flex-1 px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {uploading ? 'Gerando UUID...' : (isUploadPrepared ? 'UUID gerado' : 'Gerar UUID')}
-              </button>
+              {/* Removido botão "Preparar base" */}
               <button
                 onClick={confirmUpload}
                 disabled={uploading}
@@ -2267,11 +2120,7 @@ const UploadCSV = ({ onClose }) => {
                 Começar envio
               </button>
             </div>
-            {!isUploadPrepared && (
-              <p className="mt-2 text-xs text-yellow-400">
-                Modo sem banco: sem UUID os envios não são registrados no banco nem sincronizados em relatórios.
-              </p>
-            )}
+            {/* Removido aviso de preparação de base */}
           </div>
         </div>
       )}

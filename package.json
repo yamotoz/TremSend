@@ -19,6 +19,7 @@
   },
   "scripts": {
     "start": "react-scripts start",
+    "start:3001": "set PORT=3001 && react-scripts start",
     "build": "react-scripts build",
     "postbuild": "powershell -Command \"Copy-Item build\\index.html build\\200.html\"",
     "deploy": "npm run build && surge --project ./build --domain tremsend-pt-20251106.surge.sh",
